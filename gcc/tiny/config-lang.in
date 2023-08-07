@@ -1,4 +1,4 @@
-# gcc-src/gcc/config/config-lang.in
+# gcc-src/gcc/tiny/config-lang.in
 language="tiny"
 
 compilers="tiny1\$(exeext)"
