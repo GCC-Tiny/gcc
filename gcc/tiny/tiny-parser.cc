@@ -215,7 +215,7 @@ Parser::expect_token (Tiny::TokenId token_id)
     }
   else
     {
-      error_at (t->get_locus (), "expecting %s but %s found\n",
+      error_at (t->get_locus (), "expecting %s but %s found",
 		get_token_description (token_id), t->get_token_description ());
       return const_TokenPtr ();
     }
@@ -230,7 +230,7 @@ Parser::skip_token (Tiny::TokenId token_id)
 void
 Parser::unexpected_token (const_TokenPtr t)
 {
-  ::error_at (t->get_locus (), "unexpected %s\n", t->get_token_description ());
+  ::error_at (t->get_locus (), "unexpected %s", t->get_token_description ());
 }
 
 void
@@ -1553,7 +1553,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	Tree expr = parse_expression ();
 	tok = lexer.peek_token ();
 	if (tok->get_id () != Tiny::RIGHT_PAREN)
-	  error_at (tok->get_locus (), "expecting ) but %s found\n",
+	  error_at (tok->get_locus (), "expecting %qs but %s found",")",
 		    tok->get_token_description ());
 	else
 	  lexer.skip_token ();
@@ -1568,7 +1568,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	    || expr.get_type () != float_type_node)
 	  {
 	    error_at (tok->get_locus (),
-		      "operand of unary plus must be int or float but it is %s",
+		      "operand of unary plus must be %qs or %qs but it is '%s'","int","float",
 		      print_type (expr.get_type ()));
 	    return Tree::error ();
 	  }
@@ -1585,7 +1585,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	  {
 	    error_at (
 	      tok->get_locus (),
-	      "operand of unary minus must be int or float but it is %s",
+	      "operand of unary minus must be %qs or %qs but it is '%s'","int","float",
 	      print_type (expr.get_type ()));
 	    return Tree::error ();
 	  }
@@ -1863,7 +1863,7 @@ Parser::check_logical_operands (const_TokenPtr tok, Tree left, Tree right)
     {
       error_at (
 	tok->get_locus (),
-	"operands of operator %s must be boolean but they are %s and %s\n",
+	"operands of operator %s must be boolean but they are %s and %s",
 	tok->get_token_description (), print_type (left.get_type ()),
 	print_type (right.get_type ()));
       return false;
