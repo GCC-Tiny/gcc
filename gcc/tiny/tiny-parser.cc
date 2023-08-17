@@ -215,7 +215,7 @@ Parser::expect_token (Tiny::TokenId token_id)
     }
   else
     {
-      error_at (t->get_locus (), "expecting %s but %s found",
+      error_at (t->get_locus (), "expecting %qs but %qs found",
 		get_token_description (token_id), t->get_token_description ());
       return const_TokenPtr ();
     }
@@ -230,7 +230,7 @@ Parser::skip_token (Tiny::TokenId token_id)
 void
 Parser::unexpected_token (const_TokenPtr t)
 {
-  ::error_at (t->get_locus (), "unexpected %s", t->get_token_description ());
+  ::error_at (t->get_locus (), "unexpected %qs", t->get_token_description ());
 }
 
 void
@@ -461,7 +461,7 @@ Parser::parse_variable_declaration ()
   if (scope.get_current_mapping ().get (identifier->get_str ()))
     {
       error_at (identifier->get_locus (),
-		"name '%s' already declared in this scope",
+		"name %qs already declared in this scope",
 		identifier->get_str ().c_str ());
     }
   SymbolPtr sym (new Symbol (Tiny::VARIABLE, identifier->get_str ()));
@@ -519,7 +519,7 @@ Parser::parse_type_declaration ()
   if (scope.get_current_mapping ().get (identifier->get_str ()))
     {
       error_at (identifier->get_locus (),
-		"name '%s' already declared in this scope",
+		"name %qs already declared in this scope",
 		identifier->get_str ().c_str ());
     }
   SymbolPtr sym (new Symbol (Tiny::TYPENAME, identifier->get_str ()));
@@ -803,12 +803,12 @@ Parser::query_type (const std::string &name, location_t loc)
   SymbolPtr sym = scope.lookup (name);
   if (sym == NULL)
     {
-      error_at (loc, "type '%s' not declared in the current scope",
+      error_at (loc, "type %qs not declared in the current scope",
 		name.c_str ());
     }
   else if (sym->get_kind () != Tiny::TYPENAME)
     {
-      error_at (loc, "name '%s' is not a type", name.c_str ());
+      error_at (loc, "name %qs is not a type", name.c_str ());
       sym = SymbolPtr();
     }
   return sym;
@@ -820,12 +820,12 @@ Parser::query_variable (const std::string &name, location_t loc)
   SymbolPtr sym = scope.lookup (name);
   if (sym == NULL)
     {
-      error_at (loc, "variable '%s' not declared in the current scope",
+      error_at (loc, "variable %qs not declared in the current scope",
 		name.c_str ());
     }
   else if (sym->get_kind () != Tiny::VARIABLE)
     {
-      error_at (loc, "name '%s' is not a variable", name.c_str ());
+      error_at (loc, "name %qs is not a variable", name.c_str ());
       sym = SymbolPtr();
     }
   return sym;
@@ -842,7 +842,7 @@ Parser::query_integer_variable (const std::string &name, location_t loc)
 
       if (var_decl.get_type () != integer_type_node)
 	{
-	  error_at (loc, "variable '%s' does not have integer type",
+	  error_at (loc, "variable %qs does not have integer type",
 		    name.c_str ());
 	  sym = SymbolPtr();
 	}
@@ -878,7 +878,7 @@ Parser::parse_assignment_statement ()
   if (variable.get_type () != expr.get_type ())
     {
       error_at (first_of_expr->get_locus (),
-		"cannot assign value of type %s to a variable of type %s",
+		"cannot assign value of type %qs to a variable of type %qs",
 		print_type (expr.get_type ()),
 		print_type (variable.get_type ()));
       return Tree::error ();
@@ -1244,7 +1244,7 @@ Parser::parse_read_statement ()
   else
     {
       error_at (first_of_expr->get_locus (),
-		"variable of type %s is not a valid read operand",
+		"variable of type %qs is not a valid read operand",
 		print_type (expr.get_type ()));
       return Tree::error ();
     }
@@ -1378,7 +1378,7 @@ Parser::parse_write_statement ()
   else
     {
       error_at (first_of_expr->get_locus (),
-		"value of type %s is not a valid write operand",
+		"value of type %qs is not a valid write operand",
 		print_type (expr.get_type ()));
       return Tree::error ();
     }
@@ -1553,7 +1553,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	Tree expr = parse_expression ();
 	tok = lexer.peek_token ();
 	if (tok->get_id () != Tiny::RIGHT_PAREN)
-	  error_at (tok->get_locus (), "expecting %qs but %s found",")",
+	  error_at (tok->get_locus (), "expecting %qs but %qs found",")",
 		    tok->get_token_description ());
 	else
 	  lexer.skip_token ();
@@ -1568,7 +1568,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	    || expr.get_type () != float_type_node)
 	  {
 	    error_at (tok->get_locus (),
-		      "operand of unary plus must be %qs or %qs but it is '%s'","int","float",
+		      "operand of unary plus must be %<int%> or %<float%> but it is %qs",
 		      print_type (expr.get_type ()));
 	    return Tree::error ();
 	  }
@@ -1585,7 +1585,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	  {
 	    error_at (
 	      tok->get_locus (),
-	      "operand of unary minus must be %qs or %qs but it is '%s'","int","float",
+	      "operand of unary minus must %<int%> or %<float%> but it is %qs",
 	      print_type (expr.get_type ()));
 	    return Tree::error ();
 	  }
@@ -1603,7 +1603,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	if (expr.get_type () != boolean_type_node)
 	  {
 	    error_at (tok->get_locus (),
-		      "operand of logical not must be a boolean but it is %s",
+		      "operand of logical not must be a %<boolean%> but it is %qs",
 		      print_type (expr.get_type ()));
 	    return Tree::error ();
 	  }
@@ -1653,7 +1653,7 @@ Parser::coerce_binary_arithmetic (const_TokenPtr tok, Tree *left, Tree *right)
 
   // i.e. int + boolean
   error_at (tok->get_locus (),
-	    "invalid operands of type %s and %s for operator %s",
+	    "invalid operands of type %qs and %qs for operator %qs",
 	    print_type (left_type), print_type (right_type),
 	    tok->get_token_description ());
   return Tree::error ();
@@ -1863,7 +1863,7 @@ Parser::check_logical_operands (const_TokenPtr tok, Tree left, Tree right)
     {
       error_at (
 	tok->get_locus (),
-	"operands of operator %s must be boolean but they are %s and %s",
+	"operands of operator %qs must be boolean but they are %qs and %qs",
 	tok->get_token_description (), print_type (left.get_type ()),
 	print_type (right.get_type ()));
       return false;
@@ -1951,7 +1951,7 @@ Parser::binary_field_ref (const const_TokenPtr tok, Tree left)
   if (field_decl.is_null ())
     {
       error_at (left.get_locus (),
-		"record type does not have a field named '%s'",
+		"record type does not have a field named %qs",
 		identifier->get_str ().c_str ());
       return Tree::error ();
     }
@@ -1992,7 +1992,7 @@ Parser::parse_boolean_expression ()
   if (expr.get_type () != boolean_type_node)
     {
       error_at (expr.get_locus (),
-		"expected expression of boolean type but its type is %s",
+		"expected expression of boolean type but its type is %qs",
 		print_type (expr.get_type ()));
       return Tree::error ();
     }
@@ -2009,7 +2009,7 @@ Parser::parse_integer_expression ()
   if (expr.get_type () != integer_type_node)
     {
       error_at (expr.get_locus (),
-		"expected expression of integer type but its type is %s",
+		"expected expression of integer type but its type is %qs",
 		print_type (expr.get_type ()));
       return Tree::error ();
     }
