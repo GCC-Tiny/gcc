@@ -1585,7 +1585,7 @@ Parser::null_denotation (const_TokenPtr tok)
 	  {
 	    error_at (
 	      tok->get_locus (),
-	      "operand of unary minus must %<int%> or %<float%> but it is %qs",
+	      "operand of unary minus must be %<int%> or %<float%> but it is %qs",
 	      print_type (expr.get_type ()));
 	    return Tree::error ();
 	  }
