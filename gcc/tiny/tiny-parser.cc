@@ -1564,12 +1564,13 @@ Parser::null_denotation (const_TokenPtr tok)
 	Tree expr = parse_expression (LBP_UNARY_PLUS);
 	if (expr.is_error ())
 	  return Tree::error ();
-	if (expr.get_type () != integer_type_node
-	    || expr.get_type () != float_type_node)
+
+	if ( expr.get_type () != integer_type_node
+	  && expr.get_type () != float_type_node)
 	  {
 	    error_at (tok->get_locus (),
-		      "operand of unary plus must be %<int%> or %<float%> but it is %qs",
-		      print_type (expr.get_type ()));
+		      "operand of unary plus must be %<int%> or %<float%> but it is %qs, and not expected %qs",
+		      print_type (expr.get_type ()),print_type(integer_type_node));
 	    return Tree::error ();
 	  }
 	return Tree (expr, tok->get_locus ());
@@ -1580,13 +1581,14 @@ Parser::null_denotation (const_TokenPtr tok)
 	if (expr.is_error ())
 	  return Tree::error ();
 
-	if (expr.get_type () != integer_type_node
-	    || expr.get_type () != float_type_node)
+	if (   expr.get_type () != integer_type_node
+	    && expr.get_type () != float_type_node
+      )
 	  {
 	    error_at (
 	      tok->get_locus (),
-	      "operand of unary minus must be %<int%> or %<float%> but it is %qs",
-	      print_type (expr.get_type ()));
+	      "operand of unary minus must be %<int%> or %<float%> but it is %qs, and not expected %qs",
+	      print_type (expr.get_type ()),print_type (integer_type_node));
 	    return Tree::error ();
 	  }
 
