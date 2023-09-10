@@ -215,7 +215,7 @@ Lexer::build_token ()
 	case '#': /* comment */
 	  current_column++;
 	  current_char = peek_input ();
-	  while (current_char != '\n')
+	  while (current_char != '\n' && current_char != EOF)
 	    {
 	      skip_input ();
 	      current_column++; // won't be used
