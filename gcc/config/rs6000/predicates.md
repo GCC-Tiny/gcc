@@ -924,7 +924,7 @@
 (define_predicate "vsx_quad_dform_memory_operand"
   (match_code "mem")
 {
-  if (!TARGET_P9_VECTOR || GET_MODE_SIZE (mode) != 16)
+  if (!TARGET_P9_VECTOR)
     return false;
 
   return quad_address_p (XEXP (op, 0), mode, false);
@@ -2098,3 +2098,8 @@
   else
     return false;
 })
+
+(define_predicate "lowpart_subreg_operator"
+  (and (match_code "subreg")
+       (match_test "subreg_lowpart_offset (mode, GET_MODE (SUBREG_REG (op)))
+		    == SUBREG_BYTE (op)")))

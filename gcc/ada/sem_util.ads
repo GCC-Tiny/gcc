@@ -889,7 +889,8 @@ package Sem_Util is
    --  such a loop exists, return the entity of its identifier (E_Loop scope),
    --  otherwise return Empty.
 
-   function Find_Enclosing_Scope (N : Node_Id) return Entity_Id;
+   function Find_Enclosing_Scope (N : Node_Id) return Scope_Kind_Id with
+     Post => Find_Enclosing_Scope'Result /= N;
    --  Find the nearest scope which encloses arbitrary node N
 
    function Find_Loop_In_Conditional_Block (N : Node_Id) return Node_Id;
@@ -1477,6 +1478,10 @@ package Sem_Util is
 
    function Is_Container_Aggregate (Exp : Node_Id) return Boolean;
    --  Is the given expression a container aggregate?
+
+   function Is_Function_With_Side_Effects (Subp : Entity_Id) return Boolean;
+   --  Return True if Subp is a function with side-effects, ie. it has a
+   --  (direct or inherited) pragma Side_Effects with static value True.
 
    function Is_Newly_Constructed
      (Exp : Node_Id; Context_Requires_NC : Boolean) return Boolean;
@@ -3163,9 +3168,6 @@ package Sem_Util is
    --  Copies the Is_Atomic, Is_Independent and Is_Volatile_Full_Access flags
    --  from sub(type) entity T2 to (sub)type entity T1, as well as Is_Volatile
    --  if T1 is a base type.
-
-   procedure Set_Scope_Is_Transient (V : Boolean := True);
-   --  Set the flag Is_Transient of the current scope
 
    procedure Set_Size_Info (T1, T2 : Entity_Id);
    pragma Inline (Set_Size_Info);

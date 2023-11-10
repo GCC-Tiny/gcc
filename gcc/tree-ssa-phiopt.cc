@@ -63,7 +63,13 @@ single_non_singleton_phi_for_edges (gimple_seq seq, edge e0, edge e1)
   gimple_stmt_iterator i;
   gphi *phi = NULL;
   if (gimple_seq_singleton_p (seq))
-    return as_a <gphi *> (gsi_stmt (gsi_start (seq)));
+    {
+      phi = as_a <gphi *> (gsi_stmt (gsi_start (seq)));
+      /* Never return virtual phis.  */
+      if (virtual_operand_p (gimple_phi_result (phi)))
+	return NULL;
+      return phi;
+    }
   for (i = gsi_start (seq); !gsi_end_p (i); gsi_next (&i))
     {
       gphi *p = as_a <gphi *> (gsi_stmt (i));
@@ -71,6 +77,10 @@ single_non_singleton_phi_for_edges (gimple_seq seq, edge e0, edge e1)
       if (operand_equal_for_phi_arg_p (gimple_phi_arg_def (p, e0->dest_idx),
 				       gimple_phi_arg_def (p, e1->dest_idx)))
 	continue;
+
+      /* Punt on virtual phis with different arguments from the edges.  */
+      if (virtual_operand_p (gimple_phi_result (p)))
+	return NULL;
 
       /* If we already have a PHI that has the two edge arguments are
 	 different, then return it is not a singleton for these PHIs. */
@@ -300,7 +310,9 @@ factor_out_conditional_operation (edge e0, edge e1, gphi *phi,
 	return NULL;
       /* If arg1 is an INTEGER_CST, fold it to new type.  */
       if (INTEGRAL_TYPE_P (TREE_TYPE (new_arg0))
-	  && int_fits_type_p (arg1, TREE_TYPE (new_arg0)))
+	  && (int_fits_type_p (arg1, TREE_TYPE (new_arg0))
+	      || (TYPE_PRECISION (TREE_TYPE (new_arg0))
+		   == TYPE_PRECISION (TREE_TYPE (arg1)))))
 	{
 	  if (gimple_assign_cast_p (arg0_def_stmt))
 	    {
@@ -312,8 +324,12 @@ factor_out_conditional_operation (edge e0, edge e1, gphi *phi,
 		 if arg0_def_stmt is the only non-debug stmt in
 		 its basic block, because then it is possible this
 		 could enable further optimizations (minmax replacement
-		 etc.).  See PR71016.  */
-	      if (new_arg0 != gimple_cond_lhs (cond_stmt)
+		 etc.).  See PR71016.
+		 Note no-op conversions don't have this issue as
+		 it will not generate any zero/sign extend in that case.  */
+	      if ((TYPE_PRECISION (TREE_TYPE (new_arg0))
+		    != TYPE_PRECISION (TREE_TYPE (arg1)))
+	          && new_arg0 != gimple_cond_lhs (cond_stmt)
 		  && new_arg0 != gimple_cond_rhs (cond_stmt)
 		  && gimple_bb (arg0_def_stmt) == e0->src)
 		{
@@ -344,6 +360,10 @@ factor_out_conditional_operation (edge e0, edge e1, gphi *phi,
 		    return NULL;
 		}
 	      new_arg1 = fold_convert (TREE_TYPE (new_arg0), arg1);
+
+	      /* Drop the overlow that fold_convert might add. */
+	      if (TREE_OVERFLOW (new_arg1))
+		new_arg1 = drop_tree_overflow (new_arg1);
 	    }
 	  else
 	    return NULL;
@@ -486,7 +506,6 @@ gimple_simplify_phiopt (bool early_p, tree type, gimple *comp_stmt,
 			tree arg0, tree arg1,
 			gimple_seq *seq)
 {
-  tree result;
   gimple_seq seq1 = NULL;
   enum tree_code comp_code = gimple_cond_code (comp_stmt);
   location_t loc = gimple_location (comp_stmt);
@@ -516,18 +535,29 @@ gimple_simplify_phiopt (bool early_p, tree type, gimple *comp_stmt,
 
   if (op.resimplify (&seq1, follow_all_ssa_edges))
     {
-      /* Early we want only to allow some generated tree codes. */
-      if (!early_p
-	  || phiopt_early_allow (seq1, op))
+      bool allowed = !early_p || phiopt_early_allow (seq1, op);
+      tree result = maybe_push_res_to_seq (&op, &seq1);
+      if (dump_file && (dump_flags & TDF_FOLDING))
 	{
-	  result = maybe_push_res_to_seq (&op, &seq1);
+	  fprintf (dump_file, "\nphiopt match-simplify back:\n");
+	  if (seq1)
+	    print_gimple_seq (dump_file, seq1, 0, TDF_VOPS|TDF_MEMSYMS);
+	  fprintf (dump_file, "result: ");
 	  if (result)
-	    {
-	      if (loc != UNKNOWN_LOCATION)
-		annotate_all_with_location (seq1, loc);
-	      gimple_seq_add_seq_without_update (seq, seq1);
-	      return result;
-	    }
+	    print_generic_expr (dump_file, result);
+	  else
+	    fprintf (dump_file, " (none)");
+	  fprintf (dump_file, "\n");
+	  if (!allowed)
+	    fprintf (dump_file, "rejected because early\n");
+	}
+      /* Early we want only to allow some generated tree codes. */
+      if (allowed && result)
+	{
+	  if (loc != UNKNOWN_LOCATION)
+	    annotate_all_with_location (seq1, loc);
+	  gimple_seq_add_seq_without_update (seq, seq1);
+	  return result;
 	}
     }
   gimple_seq_discard (seq1);
@@ -559,18 +589,29 @@ gimple_simplify_phiopt (bool early_p, tree type, gimple *comp_stmt,
 
   if (op1.resimplify (&seq1, follow_all_ssa_edges))
     {
-      /* Early we want only to allow some generated tree codes. */
-      if (!early_p
-	  || phiopt_early_allow (seq1, op1))
+      bool allowed = !early_p || phiopt_early_allow (seq1, op1);
+      tree result = maybe_push_res_to_seq (&op1, &seq1);
+      if (dump_file && (dump_flags & TDF_FOLDING))
 	{
-	  result = maybe_push_res_to_seq (&op1, &seq1);
+	  fprintf (dump_file, "\nphiopt match-simplify back:\n");
+	  if (seq1)
+	    print_gimple_seq (dump_file, seq1, 0, TDF_VOPS|TDF_MEMSYMS);
+	  fprintf (dump_file, "result: ");
 	  if (result)
-	    {
-	      if (loc != UNKNOWN_LOCATION)
-		annotate_all_with_location (seq1, loc);
-	      gimple_seq_add_seq_without_update (seq, seq1);
-	      return result;
-	    }
+	    print_generic_expr (dump_file, result);
+	  else
+	    fprintf (dump_file, " (none)");
+	  fprintf (dump_file, "\n");
+	  if (!allowed)
+	    fprintf (dump_file, "rejected because early\n");
+	}
+      /* Early we want only to allow some generated tree codes. */
+      if (allowed && result)
+	{
+	  if (loc != UNKNOWN_LOCATION)
+	    annotate_all_with_location (seq1, loc);
+	  gimple_seq_add_seq_without_update (seq, seq1);
+	  return result;
 	}
     }
   gimple_seq_discard (seq1);
@@ -842,6 +883,8 @@ match_simplify_replacement (basic_block cond_bb, basic_block middle_bb,
 
   if (!result)
     return false;
+  if (dump_file && (dump_flags & TDF_FOLDING))
+    fprintf (dump_file, "accepted the phiopt match-simplify.\n");
 
   auto_bitmap exprs_maybe_dce;
 
@@ -867,11 +910,6 @@ match_simplify_replacement (basic_block cond_bb, basic_block middle_bb,
 	  tree name = gimple_get_lhs (stmt);
 	  if (name && TREE_CODE (name) == SSA_NAME)
 	    bitmap_set_bit (exprs_maybe_dce, SSA_NAME_VERSION (name));
-	}
-      if (dump_file && (dump_flags & TDF_FOLDING))
-	{
-	  fprintf (dump_file, "Folded into the sequence:\n");
-	  print_gimple_seq (dump_file, seq, 0, TDF_VOPS|TDF_MEMSYMS);
 	}
     gsi_insert_seq_before (&gsi, seq, GSI_CONTINUE_LINKING);
   }
@@ -1795,7 +1833,9 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
       arg_false = arg0;
     }
 
-  if (empty_block_p (middle_bb))
+  if (empty_block_p (middle_bb)
+      && (!threeway_p
+	  || empty_block_p (alt_middle_bb)))
     {
       if ((operand_equal_for_phi_arg_p (arg_true, smaller)
 	   || (alt_smaller
@@ -1978,7 +2018,8 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
 
       return true;
     }
-  else
+  else if (!threeway_p
+	   || empty_block_p (alt_middle_bb))
     {
       /* Recognize the following case, assuming d <= u:
 
@@ -2042,7 +2083,7 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
 
 	      /* We need BOUND <= LARGER.  */
 	      if (!integer_nonzerop (fold_build2 (LE_EXPR, boolean_type_node,
-						  bound, larger)))
+						  bound, arg_false)))
 		return false;
 	    }
 	  else if (operand_equal_for_phi_arg_p (arg_false, smaller)
@@ -2073,7 +2114,7 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
 
 	      /* We need BOUND >= SMALLER.  */
 	      if (!integer_nonzerop (fold_build2 (GE_EXPR, boolean_type_node,
-						  bound, smaller)))
+						  bound, arg_false)))
 		return false;
 	    }
 	  else
@@ -2113,7 +2154,7 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
 
 	      /* We need BOUND >= LARGER.  */
 	      if (!integer_nonzerop (fold_build2 (GE_EXPR, boolean_type_node,
-						  bound, larger)))
+						  bound, arg_true)))
 		return false;
 	    }
 	  else if (operand_equal_for_phi_arg_p (arg_true, smaller)
@@ -2140,7 +2181,7 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
 
 	      /* We need BOUND <= SMALLER.  */
 	      if (!integer_nonzerop (fold_build2 (LE_EXPR, boolean_type_node,
-						  bound, smaller)))
+						  bound, arg_true)))
 		return false;
 	    }
 	  else
@@ -2154,6 +2195,8 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
 							  SSA_OP_DEF));
       gsi_move_before (&gsi_from, &gsi);
     }
+  else
+    return false;
 
   /* Emit the statement to compute min/max.  */
   gimple_seq stmts = NULL;

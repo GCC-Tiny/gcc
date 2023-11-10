@@ -4300,6 +4300,8 @@ output_constant_pool_contents (struct rtx_constant_pool *pool)
     if (desc->mark < 0)
       {
 #ifdef ASM_OUTPUT_DEF
+	gcc_checking_assert (TARGET_SUPPORTS_ALIASES);
+
 	const char *name = XSTR (desc->sym, 0);
 	char label[256];
 	char buffer[256 + 32];
@@ -5281,6 +5283,61 @@ output_constant (tree exp, unsigned HOST_WIDE_INT size, unsigned int align,
 		       reverse, false);
       break;
 
+    case BITINT_TYPE:
+      if (TREE_CODE (exp) != INTEGER_CST)
+	error ("initializer for %<_BitInt(%d)%> value is not an integer "
+	       "constant", TYPE_PRECISION (TREE_TYPE (exp)));
+      else
+	{
+	  struct bitint_info info;
+	  tree type = TREE_TYPE (exp);
+	  bool ok = targetm.c.bitint_type_info (TYPE_PRECISION (type), &info);
+	  gcc_assert (ok);
+	  scalar_int_mode limb_mode = as_a <scalar_int_mode> (info.limb_mode);
+	  if (TYPE_PRECISION (type) <= GET_MODE_PRECISION (limb_mode))
+	    {
+	      cst = expand_expr (exp, NULL_RTX, VOIDmode, EXPAND_INITIALIZER);
+	      if (reverse)
+		cst = flip_storage_order (TYPE_MODE (TREE_TYPE (exp)), cst);
+	      if (!assemble_integer (cst, MIN (size, thissize), align, 0))
+		error ("initializer for integer/fixed-point value is too "
+		       "complicated");
+	      break;
+	    }
+	  int prec = GET_MODE_PRECISION (limb_mode);
+	  int cnt = CEIL (TYPE_PRECISION (type), prec);
+	  tree limb_type = build_nonstandard_integer_type (prec, 1);
+	  int elt_size = GET_MODE_SIZE (limb_mode);
+	  unsigned int nalign = MIN (align, GET_MODE_ALIGNMENT (limb_mode));
+	  thissize = 0;
+	  if (prec == HOST_BITS_PER_WIDE_INT)
+	    for (int i = 0; i < cnt; i++)
+	      {
+		int idx = (info.big_endian ^ reverse) ? cnt - 1 - i : i;
+		tree c;
+		if (idx >= TREE_INT_CST_EXT_NUNITS (exp))
+		  c = build_int_cst (limb_type,
+				     tree_int_cst_sgn (exp) < 0 ? -1 : 0);
+		else
+		  c = build_int_cst (limb_type,
+				     TREE_INT_CST_ELT (exp, idx));
+		output_constant (c, elt_size, nalign, reverse, false);
+		thissize += elt_size;
+	      }
+	  else
+	    for (int i = 0; i < cnt; i++)
+	      {
+		int idx = (info.big_endian ^ reverse) ? cnt - 1 - i : i;
+		wide_int w = wi::rshift (wi::to_wide (exp), idx * prec,
+					 TYPE_SIGN (TREE_TYPE (exp)));
+		tree c = wide_int_to_tree (limb_type,
+					   wide_int::from (w, prec, UNSIGNED));
+		output_constant (c, elt_size, nalign, reverse, false);
+		thissize += elt_size;
+	      }
+	}
+      break;
+
     case ARRAY_TYPE:
     case VECTOR_TYPE:
       switch (TREE_CODE (exp))
@@ -6225,6 +6282,10 @@ do_assemble_alias (tree decl, tree target)
 		  IDENTIFIER_POINTER (id),
 		  IDENTIFIER_POINTER (target));
 # endif
+  /* If symbol aliases aren't actually supported...  */
+  if (!TARGET_SUPPORTS_ALIASES)
+    /* ..., 'ASM_OUTPUT_DEF{,_FROM_DECLS}' better have raised an error.  */
+    gcc_checking_assert (seen_error ());
 #elif defined (ASM_OUTPUT_WEAK_ALIAS) || defined (ASM_WEAKEN_DECL)
   {
     const char *name;
@@ -6294,9 +6355,8 @@ assemble_alias (tree decl, tree target)
       if (TREE_PUBLIC (decl))
 	error ("%qs symbol %q+D must have static linkage", "weakref", decl);
     }
-  else
+  else if (!TARGET_SUPPORTS_ALIASES)
     {
-#if !defined (ASM_OUTPUT_DEF)
 # if !defined(ASM_OUTPUT_WEAK_ALIAS) && !defined (ASM_WEAKEN_DECL)
       error_at (DECL_SOURCE_LOCATION (decl),
 		"alias definitions not supported in this configuration");
@@ -6317,7 +6377,7 @@ assemble_alias (tree decl, tree target)
 	  return;
 	}
 # endif
-#endif
+      gcc_unreachable ();
     }
   TREE_USED (decl) = 1;
 
@@ -7406,6 +7466,8 @@ default_strip_name_encoding (const char *str)
 void
 default_asm_output_anchor (rtx symbol)
 {
+  gcc_checking_assert (TARGET_SUPPORTS_ALIASES);
+
   char buffer[100];
 
   sprintf (buffer, "*. + " HOST_WIDE_INT_PRINT_DEC,

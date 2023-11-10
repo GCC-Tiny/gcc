@@ -46,7 +46,7 @@ compilation is specified by a string called a "spec".  */
 #include "spellcheck.h"
 #include "opts-jobserver.h"
 #include "common/common-target.h"
-#include "diagnostic-text-art.h"
+#include "gcc-urlifier.h"
 
 #ifndef MATH_LIBRARY
 #define MATH_LIBRARY "m"
@@ -447,6 +447,7 @@ static const char *greater_than_spec_func (int, const char **);
 static const char *debug_level_greater_than_spec_func (int, const char **);
 static const char *dwarf_version_greater_than_spec_func (int, const char **);
 static const char *find_fortran_preinclude_file (int, const char **);
+static const char *join_spec_func (int, const char **);
 static char *convert_white_space (char *);
 static char *quote_spec (char *);
 static char *quote_spec_arg (char *);
@@ -579,6 +580,7 @@ or with constant text in a single argument.
  %l     process LINK_SPEC as a spec.
  %L     process LIB_SPEC as a spec.
  %M     Output multilib_os_dir.
+ %P	Output a RUNPATH_OPTION for each directory in startfile_prefixes.
  %G     process LIBGCC_SPEC as a spec.
  %R     Output the concatenation of target_system_root and
         target_sysroot_suffix.
@@ -1182,6 +1184,10 @@ proper position among the other output files.  */
 # define SYSROOT_HEADERS_SUFFIX_SPEC ""
 #endif
 
+#ifndef RUNPATH_OPTION
+# define RUNPATH_OPTION "-rpath"
+#endif
+
 static const char *asm_debug = ASM_DEBUG_SPEC;
 static const char *asm_debug_option = ASM_DEBUG_OPTION_SPEC;
 static const char *cpp_spec = CPP_SPEC;
@@ -1235,7 +1241,9 @@ static const char *cpp_unique_options =
  %{remap} %{%:debug-level-gt(2):-dD}\
  %{!iplugindir*:%{fplugin*:%:find-plugindir()}}\
  %{H} %C %{D*&U*&A*} %{i*} %Z %i\
- %{E|M|MM:%W{o*}}";
+ %{E|M|MM:%W{o*}}\
+ %{fdeps-format=*:%{!fdeps-file=*:-fdeps-file=%:join(%{!o:%b.ddi}%{o*:%.ddi%*})}}\
+ %{fdeps-format=*:%{!fdeps-target=*:-fdeps-target=%:join(%{!o:%b.o}%{o*:%.o%*})}}";
 
 /* This contains cpp options which are common with cc1_options and are passed
    only when preprocessing only to avoid duplication.  We pass the cc1 spec
@@ -1772,6 +1780,7 @@ static const struct spec_function static_spec_functions[] =
   { "debug-level-gt",		debug_level_greater_than_spec_func },
   { "dwarf-version-gt",		dwarf_version_greater_than_spec_func },
   { "fortran-preinclude-file",	find_fortran_preinclude_file},
+  { "join",			join_spec_func},
 #ifdef EXTRA_SPEC_FUNCTIONS
   EXTRA_SPEC_FUNCTIONS
 #endif
@@ -4346,8 +4355,7 @@ driver_handle_option (struct gcc_options *opts,
 	}
 
     case OPT_fdiagnostics_text_art_charset_:
-      diagnostics_text_art_charset_init (dc,
-					 (enum diagnostic_text_art_charset)value);
+      dc->set_text_art_charset ((enum diagnostic_text_art_charset)value);
       break;
 
     case OPT_Wa_:
@@ -5533,7 +5541,7 @@ set_collect_gcc_options (void)
   obstack_grow (&collect_obstack, "COLLECT_GCC_OPTIONS=",
 		sizeof ("COLLECT_GCC_OPTIONS=") - 1);
 
-  first_time = TRUE;
+  first_time = true;
   for (i = 0; (int) i < n_switches; i++)
     {
       const char *const *args;
@@ -5541,7 +5549,7 @@ set_collect_gcc_options (void)
       if (!first_time)
 	obstack_grow (&collect_obstack, " ", 1);
 
-      first_time = FALSE;
+      first_time = false;
 
       /* Ignore elided switches.  */
       if ((switches[i].live_cond
@@ -5579,7 +5587,7 @@ set_collect_gcc_options (void)
     {
       if (!first_time)
 	obstack_grow (&collect_obstack, " ", 1);
-      first_time = FALSE;
+      first_time = false;
 
       obstack_grow (&collect_obstack, "'-dumpdir' '", 12);
       const char *p, *q;
@@ -5925,6 +5933,7 @@ struct spec_path_info {
   size_t append_len;
   bool omit_relative;
   bool separate_options;
+  bool realpaths;
 };
 
 static void *
@@ -5933,6 +5942,16 @@ spec_path (char *path, void *data)
   struct spec_path_info *info = (struct spec_path_info *) data;
   size_t len = 0;
   char save = 0;
+
+  /* The path must exist; we want to resolve it to the realpath so that this
+     can be embedded as a runpath.  */
+  if (info->realpaths)
+     path = lrealpath (path);
+
+  /* However, if we failed to resolve it - perhaps because there was a bogus
+     -B option on the command line, then punt on this entry.  */
+  if (!path)
+    return NULL;
 
   if (info->omit_relative && !IS_ABSOLUTE_PATH (path))
     return NULL;
@@ -6165,6 +6184,22 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	      info.omit_relative = false;
 #endif
 	      info.separate_options = false;
+	      info.realpaths = false;
+
+	      for_each_path (&startfile_prefixes, true, 0, spec_path, &info);
+	    }
+	    break;
+
+	  case 'P':
+	    {
+	      struct spec_path_info info;
+
+	      info.option = RUNPATH_OPTION;
+	      info.append_len = 0;
+	      info.omit_relative = false;
+	      info.separate_options = true;
+	      /* We want to embed the actual paths that have the libraries.  */
+	      info.realpaths = true;
 
 	      for_each_path (&startfile_prefixes, true, 0, spec_path, &info);
 	    }
@@ -6491,6 +6526,7 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	      info.append_len = strlen (info.append);
 	      info.omit_relative = false;
 	      info.separate_options = true;
+	      info.realpaths = false;
 
 	      for_each_path (&include_prefixes, false, info.append_len,
 			     spec_path, &info);
@@ -8256,6 +8292,7 @@ driver::global_initializations ()
   diagnostic_initialize (global_dc, 0);
   diagnostic_color_init (global_dc);
   diagnostic_urls_init (global_dc);
+  global_dc->set_urlifier (make_gcc_urlifier ());
 
 #ifdef GCC_DRIVER_HOST_INITIALIZATION
   /* Perform host dependent initialization when needed.  */
@@ -8332,7 +8369,7 @@ driver::build_multilib_strings () const
     obstack_1grow (&multilib_obstack, 0);
     multilib_reuse = XOBFINISH (&multilib_obstack, const char *);
 
-    need_space = FALSE;
+    need_space = false;
     for (size_t i = 0; i < ARRAY_SIZE (multilib_defaults_raw); i++)
       {
 	if (need_space)
@@ -8340,7 +8377,7 @@ driver::build_multilib_strings () const
 	obstack_grow (&multilib_obstack,
 		      multilib_defaults_raw[i],
 		      strlen (multilib_defaults_raw[i]));
-	need_space = TRUE;
+	need_space = true;
       }
 
     obstack_1grow (&multilib_obstack, 0);
@@ -10176,19 +10213,19 @@ print_multilib_info (void)
 	  /* If there are extra options, print them now.  */
 	  if (multilib_extra && *multilib_extra)
 	    {
-	      int print_at = TRUE;
+	      int print_at = true;
 	      const char *q;
 
 	      for (q = multilib_extra; *q != '\0'; q++)
 		{
 		  if (*q == ' ')
-		    print_at = TRUE;
+		    print_at = true;
 		  else
 		    {
 		      if (print_at)
 			putchar ('@');
 		      putchar (*q);
-		      print_at = FALSE;
+		      print_at = false;
 		    }
 		}
 	    }
@@ -10973,6 +11010,27 @@ find_fortran_preinclude_file (int argc, const char **argv)
 
   path_prefix_reset (&prefixes);
   return result;
+}
+
+/* The function takes any number of arguments and joins them together.
+
+   This seems to be necessary to build "-fjoined=foo.b" from "-fseparate foo.a"
+   with a %{fseparate*:-fjoined=%.b$*} rule without adding undesired spaces:
+   when doing $* replacement we first replace $* with the rest of the switch
+   (in this case ""), and then add any arguments as arguments after the result,
+   resulting in "-fjoined= foo.b".  Using this function with e.g.
+   %{fseparate*:-fjoined=%:join(%.b$*)} gets multiple words as separate argv
+   elements instead of separated by spaces, and we paste them together.  */
+
+static const char *
+join_spec_func (int argc, const char **argv)
+{
+  if (argc == 1)
+    return argv[0];
+  for (int i = 0; i < argc; ++i)
+    obstack_grow (&obstack, argv[i], strlen (argv[i]));
+  obstack_1grow (&obstack, '\0');
+  return XOBFINISH (&obstack, const char *);
 }
 
 /* If any character in ORIG fits QUOTE_P (_, P), reallocate the string

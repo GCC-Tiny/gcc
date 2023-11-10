@@ -319,6 +319,9 @@
 
 (define_mode_iterator TX [TI TF TD])
 
+;; Duplicate of the above
+(define_mode_iterator TX2 [TI TF TD])
+
 (define_mode_iterator VTX [TI TF TD V16QI V8HI V4SI V2DI V8HF V4SF V2DF V8BF])
 
 ;; Advanced SIMD opaque structure modes.
@@ -1297,6 +1300,7 @@
 			  (V4SF "16b") (V2DF  "16b")
 			  (DI   "8b")  (DF    "8b")
 			  (SI   "8b")  (SF    "8b")
+			  (QI   "8b")  (HI    "8b")
 			  (V4BF "8b")  (V8BF  "16b")])
 
 ;; Advanced SIMD vector structure to element modes.
@@ -1428,7 +1432,8 @@
 			 (V4HF "V8HF") (V8HF "V8HF")
 			 (V2SF "V4SF") (V4SF "V4SF")
 			 (V2DF "V2DF") (SI   "V4SI")
-			 (HI   "V8HI") (QI   "V16QI")])
+			 (HI   "V8HI") (QI   "V16QI")
+			 (SF   "V4SF") (DF   "V2DF")])
 
 ;; Half modes of all vector modes.
 (define_mode_attr VHALF [(V8QI "V4QI")  (V16QI "V8QI")

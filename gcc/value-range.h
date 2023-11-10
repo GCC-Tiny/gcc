@@ -139,6 +139,9 @@ public:
   void verify_mask () const;
   void dump (FILE *) const;
 
+  bool member_p (const wide_int &val) const;
+  void adjust_range (irange &r) const;
+
   // Convenience functions for nonzero bitmask compatibility.
   wide_int get_nonzero_bits () const;
   void set_nonzero_bits (const wide_int &bits);
@@ -198,6 +201,19 @@ irange_bitmask::set_nonzero_bits (const wide_int &bits)
   m_mask = bits;
   if (flag_checking)
     verify_mask ();
+}
+
+// Return TRUE if val could be a valid value with this bitmask.
+
+inline bool
+irange_bitmask::member_p (const wide_int &val) const
+{
+  if (unknown_p ())
+    return true;
+  wide_int res = m_mask & val;
+  if (m_value != 0)
+    res |= ~m_mask & m_value;
+  return res == val;
 }
 
 inline bool
@@ -288,6 +304,8 @@ public:
   virtual bool singleton_p (tree *result = NULL) const override;
   bool singleton_p (wide_int &) const;
   bool contains_p (const wide_int &) const;
+  bool nonnegative_p () const;
+  bool nonpositive_p () const;
 
   // In-place operators.
   virtual bool union_ (const vrange &) override;
@@ -337,6 +355,7 @@ private:
   bool set_range_from_bitmask ();
 
   bool intersect (const wide_int& lb, const wide_int& ub);
+  bool union_append (const irange &r);
   unsigned char m_num_ranges;
   bool m_resizable;
   unsigned char m_max_ranges;
@@ -624,7 +643,9 @@ irange::maybe_resize (int needed)
     {
       m_max_ranges = HARD_MAX_RANGES;
       wide_int *newmem = new wide_int[m_max_ranges * 2];
-      memcpy (newmem, m_base, sizeof (wide_int) * num_pairs () * 2);
+      unsigned n = num_pairs () * 2;
+      for (unsigned i = 0; i < n; ++i)
+	newmem[i] = m_base[i];
       m_base = newmem;
     }
 }
@@ -1156,7 +1177,7 @@ inline bool
 contains_zero_p (const irange &r)
 {
   if (r.undefined_p ())
-    return true;
+    return false;
 
   wide_int zero = wi::zero (TYPE_PRECISION (r.type ()));
   return r.contains_p (zero);
@@ -1255,20 +1276,30 @@ frange::set_undefined ()
     verify_range ();
 }
 
-// Set the NAN bit and adjust the range.
+// Set the NAN bits to NAN and adjust the range.
+
+inline void
+frange::update_nan (const nan_state &nan)
+{
+  gcc_checking_assert (!undefined_p ());
+  if (HONOR_NANS (m_type))
+    {
+      m_pos_nan = nan.pos_p ();
+      m_neg_nan = nan.neg_p ();
+      normalize_kind ();
+      if (flag_checking)
+	verify_range ();
+    }
+}
+
+// Set the NAN bit to +-NAN.
 
 inline void
 frange::update_nan ()
 {
   gcc_checking_assert (!undefined_p ());
-  if (HONOR_NANS (m_type))
-    {
-      m_pos_nan = true;
-      m_neg_nan = true;
-      normalize_kind ();
-      if (flag_checking)
-	verify_range ();
-    }
+  nan_state nan (true);
+  update_nan (nan);
 }
 
 // Like above, but set the sign of the NAN.
@@ -1277,14 +1308,8 @@ inline void
 frange::update_nan (bool sign)
 {
   gcc_checking_assert (!undefined_p ());
-  if (HONOR_NANS (m_type))
-    {
-      m_pos_nan = !sign;
-      m_neg_nan = sign;
-      normalize_kind ();
-      if (flag_checking)
-	verify_range ();
-    }
+  nan_state nan (/*pos=*/!sign, /*neg=*/sign);
+  update_nan (nan);
 }
 
 inline bool

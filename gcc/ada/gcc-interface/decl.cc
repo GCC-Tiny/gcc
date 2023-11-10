@@ -1145,6 +1145,18 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 		   the entity as indirect reference to the renamed object.  */
 		if (Materialize_Entity (gnat_entity))
 		  {
+		    /* If this is an aliased object with an unconstrained array
+		       nominal subtype, we make its type a thin reference, i.e.
+		       the reference counterpart of a thin pointer, exactly as
+		       we would have done in the non-renaming case below.  */
+		    if (Is_Constr_Subt_For_UN_Aliased (gnat_type)
+			&& Is_Array_Type (gnat_und_type)
+			&& !type_annotate_only)
+		      {
+			tree gnu_array
+			  = gnat_to_gnu_type (Base_Type (gnat_type));
+			gnu_type = TYPE_OBJECT_RECORD_TYPE (gnu_array);
+		      }
 		    gnu_type = build_reference_type (gnu_type);
 		    const_flag = true;
 		    volatile_flag = false;
@@ -2388,6 +2400,11 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 	  = (Is_Packed (gnat_entity)
 	     || Is_Packed_Array_Impl_Type (gnat_entity));
 
+	TYPE_BIT_PACKED_ARRAY_TYPE_P (tem)
+	  = (Is_Packed_Array_Impl_Type (gnat_entity)
+	     ? Is_Bit_Packed_Array (Original_Array_Type (gnat_entity))
+	     : Is_Bit_Packed_Array (gnat_entity));
+
 	if (Treat_As_Volatile (gnat_entity))
 	  tem = change_qualified_type (tem, TYPE_QUAL_VOLATILE);
 
@@ -2546,6 +2563,17 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 		  else
 		    gnu_min = gnu_orig_min;
 
+		  if (DECL_P (gnu_min)
+		      && DECL_INITIAL (gnu_min) != NULL_TREE
+		      && (TREE_CODE (gnu_min) != INTEGER_CST
+			  || TREE_OVERFLOW (gnu_min)))
+		    {
+		      tree tmp = max_value (DECL_INITIAL(gnu_min), false);
+		      if (TREE_CODE (tmp) == INTEGER_CST
+			  && !TREE_OVERFLOW (tmp))
+			gnu_min = tmp;
+		    }
+
 		  if (TREE_CODE (gnu_min) != INTEGER_CST
 		      || TREE_OVERFLOW (gnu_min))
 		    gnu_min = TYPE_MIN_VALUE (TREE_TYPE (gnu_min));
@@ -2554,6 +2582,17 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 		    gnu_max = gnu_base_orig_max;
 		  else
 		    gnu_max = gnu_orig_max;
+
+		  if (DECL_P (gnu_max)
+		      && DECL_INITIAL (gnu_max) != NULL_TREE
+		      && (TREE_CODE (gnu_max) != INTEGER_CST
+			  || TREE_OVERFLOW (gnu_max)))
+		    {
+		      tree tmp = max_value (DECL_INITIAL(gnu_max), true);
+		      if (TREE_CODE (tmp) == INTEGER_CST
+			  && !TREE_OVERFLOW (tmp))
+			gnu_max = tmp;
+		    }
 
 		  if (TREE_CODE (gnu_max) != INTEGER_CST
 		      || TREE_OVERFLOW (gnu_max))
@@ -2815,7 +2854,8 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 
 	  TYPE_BIT_PACKED_ARRAY_TYPE_P (gnu_type)
 	    = (Is_Packed_Array_Impl_Type (gnat_entity)
-	       && Is_Bit_Packed_Array (Original_Array_Type (gnat_entity)));
+	       ? Is_Bit_Packed_Array (Original_Array_Type (gnat_entity))
+	       : Is_Bit_Packed_Array (gnat_entity));
 
 	  /* If the maximum size doesn't overflow, use it.  */
 	  if (gnu_max_size
@@ -5086,7 +5126,7 @@ inline_status_for_subprog (Entity_Id subprog)
       tree gnu_type;
 
       /* This is a kludge to work around a pass ordering issue: for small
-	 record types with many components, i.e. typically bit-fields, the
+	 record types with many components, i.e. typically bitfields, the
 	 initialization routine can contain many assignments that will be
 	 merged by the GIMPLE store merging pass.  But this pass runs very
 	 late in the pipeline, in particular after the inlining decisions
@@ -7673,6 +7713,18 @@ gnat_to_gnu_field (Entity_Id gnat_field, tree gnu_record_type, int packed,
       orig_field_type = gnu_field_type;
       gnu_field_type = maybe_pad_type (gnu_field_type, gnu_size, 0, gnat_field,
 				       false, definition, true);
+
+      /* For a bitfield, if the type still has BLKmode, try again to change it
+	 to an integral mode form.  This may be necessary on strict-alignment
+	 platforms with a size clause that is much larger than the field type,
+	 because maybe_pad_type has preserved the alignment of the field type,
+	 which may be too low for the new size.  */
+      if (!needs_strict_alignment
+	  && RECORD_OR_UNION_TYPE_P (gnu_field_type)
+	  && !TYPE_FAT_POINTER_P (gnu_field_type)
+	  && TYPE_MODE (gnu_field_type) == BLKmode
+	  && is_bitfield)
+	gnu_field_type = make_packable_type (gnu_field_type, true, 1);
 
       /* If a padding record was made, declare it now since it will never be
 	 declared otherwise.  This is necessary to ensure that its subtrees

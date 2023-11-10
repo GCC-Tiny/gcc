@@ -49,7 +49,7 @@ along with GCC; see the file COPYING3.  If not see
 #endif
 
 /* Local functions, macros and variables.  */
-static const char *op_symbol (const_tree);
+static const char *op_symbol (const_tree, dump_flags_t = TDF_NONE);
 static void newline_and_indent (pretty_printer *, int);
 static void maybe_init_pretty_print (FILE *);
 static void print_struct_decl (pretty_printer *, const_tree, int, dump_flags_t);
@@ -583,6 +583,13 @@ dump_omp_clause (pretty_printer *pp, tree clause, int spc, dump_flags_t flags)
 	default: gcc_unreachable ();
 	}
       dump_generic_node (pp, OMP_CLAUSE_IF_EXPR (clause),
+			 spc, flags, false);
+      pp_right_paren (pp);
+      break;
+
+    case OMP_CLAUSE_SELF:
+      pp_string (pp, "self(");
+      dump_generic_node (pp, OMP_CLAUSE_SELF_EXPR (clause),
 			 spc, flags, false);
       pp_right_paren (pp);
       break;
@@ -1248,6 +1255,9 @@ dump_omp_clause (pretty_printer *pp, tree clause, int spc, dump_flags_t flags)
 	{
 	case OMP_CLAUSE_DEFAULTMAP_CATEGORY_UNSPECIFIED:
 	  break;
+	case OMP_CLAUSE_DEFAULTMAP_CATEGORY_ALL:
+	  pp_string (pp, ":all");
+	  break;
 	case OMP_CLAUSE_DEFAULTMAP_CATEGORY_SCALAR:
 	  pp_string (pp, ":scalar");
 	  break;
@@ -1450,7 +1460,6 @@ dump_omp_clause (pretty_printer *pp, tree clause, int spc, dump_flags_t flags)
 			 false);
       pp_right_paren (pp);
       break;
-
     default:
       gcc_unreachable ();
     }
@@ -1900,6 +1909,7 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
     case TREE_VEC:
       {
 	size_t i;
+	pp_left_brace (pp);
 	if (TREE_VEC_LENGTH (node) > 0)
 	  {
 	    size_t len = TREE_VEC_LENGTH (node);
@@ -1913,6 +1923,7 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
 	    dump_generic_node (pp, TREE_VEC_ELT (node, len - 1), spc,
 			       flags, false);
 	  }
+	pp_right_brace (pp);
       }
       break;
 
@@ -1924,6 +1935,7 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
     case VECTOR_TYPE:
     case ENUMERAL_TYPE:
     case BOOLEAN_TYPE:
+    case BITINT_TYPE:
     case OPAQUE_TYPE:
       {
 	unsigned int quals = TYPE_QUALS (node);
@@ -2037,6 +2049,14 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
 				: "<signed-boolean:"));
 		pp_decimal_int (pp, TYPE_PRECISION (node));
 		pp_greater (pp);
+	      }
+	    else if (TREE_CODE (node) == BITINT_TYPE)
+	      {
+		if (TYPE_UNSIGNED (node))
+		  pp_string (pp, "unsigned ");
+		pp_string (pp, "_BitInt(");
+		pp_decimal_int (pp, TYPE_PRECISION (node));
+		pp_right_paren (pp);
 	      }
 	    else if (TREE_CODE (node) == VOID_TYPE)
 	      pp_string (pp, "void");
@@ -2234,8 +2254,19 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
 	      pp_minus (pp);
 	      val = -val;
 	    }
-	  print_hex (val, pp_buffer (pp)->digit_buffer);
-	  pp_string (pp, pp_buffer (pp)->digit_buffer);
+	  unsigned int len;
+	  print_hex_buf_size (val, &len);
+	  if (UNLIKELY (len > sizeof (pp_buffer (pp)->digit_buffer)))
+	    {
+	      char *buf = XALLOCAVEC (char, len);
+	      print_hex (val, buf);
+	      pp_string (pp, buf);
+	    }
+	  else
+	    {
+	      print_hex (val, pp_buffer (pp)->digit_buffer);
+	      pp_string (pp, pp_buffer (pp)->digit_buffer);
+	    }
 	}
       if ((flags & TDF_GIMPLE)
 	  && ! (POINTER_TYPE_P (TREE_TYPE (node))
@@ -2482,14 +2513,16 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
       if (op_prio (op0) < op_prio (node))
 	pp_right_paren (pp);
       pp_string (pp, str);
-      dump_generic_node (pp, TREE_OPERAND (node, 1), spc, flags, false);
-      op0 = component_ref_field_offset (node);
-      if (op0 && TREE_CODE (op0) != INTEGER_CST)
-	{
-	  pp_string (pp, "{off: ");
-	      dump_generic_node (pp, op0, spc, flags, false);
+      op1 = TREE_OPERAND (node, 1);
+      dump_generic_node (pp, op1, spc, flags, false);
+      if (DECL_P (op1)) /* Not always a decl in the C++ FE.  */
+	if (tree off = component_ref_field_offset (node))
+	  if (TREE_CODE (off) != INTEGER_CST)
+	    {
+	      pp_string (pp, "{off: ");
+	      dump_generic_node (pp, off, spc, flags, false);
 	      pp_right_brace (pp);
-	}
+	    }
       break;
 
     case BIT_FIELD_REF:
@@ -3741,6 +3774,10 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
       pp_string (pp, "#pragma omp section");
       goto dump_omp_body;
 
+    case OMP_STRUCTURED_BLOCK:
+      pp_string (pp, "#pragma omp __structured_block");
+      goto dump_omp_body;
+
     case OMP_SCAN:
       if (OMP_SCAN_CLAUSES (node))
 	{
@@ -4297,7 +4334,7 @@ op_prio (const_tree op)
 /* Return the symbol associated with operator CODE.  */
 
 const char *
-op_symbol_code (enum tree_code code)
+op_symbol_code (enum tree_code code, dump_flags_t flags)
 {
   switch (code)
     {
@@ -4324,14 +4361,14 @@ op_symbol_code (enum tree_code code)
       return "&";
 
     case ORDERED_EXPR:
-      return "ord";
+      return (flags & TDF_GIMPLE) ? "__ORDERED" : "ord";
     case UNORDERED_EXPR:
-      return "unord";
+      return (flags & TDF_GIMPLE) ? "__UNORDERED" : "unord";
 
     case EQ_EXPR:
       return "==";
     case UNEQ_EXPR:
-      return "u==";
+      return (flags & TDF_GIMPLE) ? "__UNEQ" : "u==";
 
     case NE_EXPR:
       return "!=";
@@ -4339,25 +4376,25 @@ op_symbol_code (enum tree_code code)
     case LT_EXPR:
       return "<";
     case UNLT_EXPR:
-      return "u<";
+      return (flags & TDF_GIMPLE) ? "__UNLT" : "u<";
 
     case LE_EXPR:
       return "<=";
     case UNLE_EXPR:
-      return "u<=";
+      return (flags & TDF_GIMPLE) ? "__UNLE" : "u<=";
 
     case GT_EXPR:
       return ">";
     case UNGT_EXPR:
-      return "u>";
+      return (flags & TDF_GIMPLE) ? "__UNGT" : "u>";
 
     case GE_EXPR:
       return ">=";
     case UNGE_EXPR:
-      return "u>=";
+      return (flags & TDF_GIMPLE) ? "__UNGE" : "u>=";
 
     case LTGT_EXPR:
-      return "<>";
+      return (flags & TDF_GIMPLE) ? "__LTGT" : "<>";
 
     case LSHIFT_EXPR:
       return "<<";
@@ -4387,7 +4424,7 @@ op_symbol_code (enum tree_code code)
       return "w*";
 
     case MULT_HIGHPART_EXPR:
-      return "h*";
+      return (flags & TDF_GIMPLE) ? "__MULT_HIGHPART" : "h*";
 
     case NEGATE_EXPR:
     case MINUS_EXPR:
@@ -4458,9 +4495,9 @@ op_symbol_code (enum tree_code code)
 /* Return the symbol associated with operator OP.  */
 
 static const char *
-op_symbol (const_tree op)
+op_symbol (const_tree op, dump_flags_t flags)
 {
-  return op_symbol_code (TREE_CODE (op));
+  return op_symbol_code (TREE_CODE (op), flags);
 }
 
 /* Prints the name of a call.  NODE is the CALL_EXPR_FN of a CALL_EXPR or

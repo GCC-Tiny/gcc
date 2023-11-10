@@ -94,6 +94,23 @@ public:
 			  sarif_builder *builder);
 };
 
+/* Subclass of sarif_object for SARIF threadFlow objects
+   (SARIF v2.1.0 section 3.37) for PATH.  */
+
+class sarif_thread_flow : public sarif_object
+{
+public:
+  sarif_thread_flow (const diagnostic_thread &thread);
+
+  void add_location (json::object *thread_flow_loc_obj)
+  {
+    m_locations_arr->append (thread_flow_loc_obj);
+  }
+
+private:
+  json::array *m_locations_arr;
+};
+
 /* A class for managing SARIF output (for -fdiagnostics-format=sarif-stderr
    and -fdiagnostics-format=sarif-file).
 
@@ -168,9 +185,9 @@ private:
   json::object *
   make_logical_location_object (const logical_location &logical_loc) const;
   json::object *make_code_flow_object (const diagnostic_path &path);
-  json::object *make_thread_flow_object (const diagnostic_path &path);
   json::object *
-  make_thread_flow_location_object (const diagnostic_event &event);
+  make_thread_flow_location_object (const diagnostic_event &event,
+				    int path_event_idx);
   json::array *maybe_make_kinds_array (diagnostic_event::meaning m) const;
   json::object *maybe_make_physical_location_object (location_t loc);
   json::object *make_artifact_location_object (location_t loc);
@@ -198,6 +215,9 @@ private:
   json::object *
   make_reporting_descriptor_reference_object_for_cwe_id (int cwe_id);
   json::object *make_artifact_object (const char *filename);
+  char *get_source_lines (const char *filename,
+			  int start_line,
+			  int end_line) const;
   json::object *maybe_make_artifact_content_object (const char *filename) const;
   json::object *maybe_make_artifact_content_object (const char *filename,
 						    int start_line,
@@ -230,8 +250,6 @@ private:
 
   int m_tabstop;
 };
-
-static sarif_builder *the_builder;
 
 /* class sarif_object : public json::object.  */
 
@@ -278,8 +296,8 @@ sarif_invocation::prepare_to_flush (diagnostic_context *context)
 
   /* Call client hook, allowing it to create a custom property bag for
      this object (SARIF v2.1.0 section 3.8) e.g. for recording time vars.  */
-  if (context->m_client_data_hooks)
-    context->m_client_data_hooks->add_sarif_invocation_properties (*this);
+  if (auto client_data_hooks = context->get_client_data_hooks ())
+    client_data_hooks->add_sarif_invocation_properties (*this);
 }
 
 /* class sarif_result : public sarif_object.  */
@@ -365,6 +383,19 @@ sarif_ice_notification::sarif_ice_notification (diagnostic_context *context,
   set ("level", new json::string ("error"));
 }
 
+/* class sarif_thread_flow : public sarif_object.  */
+
+sarif_thread_flow::sarif_thread_flow (const diagnostic_thread &thread)
+{
+  /* "id" property (SARIF v2.1.0 section 3.37.2).  */
+  label_text name (thread.get_name (false));
+  set ("id", new json::string (name.get ()));
+
+  /* "locations" property (SARIF v2.1.0 section 3.37.6).  */
+  m_locations_arr = new json::array ();
+  set ("locations", m_locations_arr);
+}
+
 /* class sarif_builder.  */
 
 /* sarif_builder's ctor.  */
@@ -377,7 +408,7 @@ sarif_builder::sarif_builder (diagnostic_context *context)
   m_seen_any_relative_paths (false),
   m_rule_id_set (),
   m_rules_arr (new json::array ()),
-  m_tabstop (context->tabstop)
+  m_tabstop (context->m_tabstop)
 {
 }
 
@@ -505,8 +536,8 @@ sarif_builder::make_result_object (diagnostic_context *context,
   /* "ruleId" property (SARIF v2.1.0 section 3.27.5).  */
   /* Ideally we'd have an option_name for these.  */
   if (char *option_text
-	= context->option_name (context, diagnostic->option_index,
-				orig_diag_kind, diagnostic->kind))
+	= context->m_option_name (context, diagnostic->option_index,
+				  orig_diag_kind, diagnostic->kind))
     {
       /* Lazily create reportingDescriptor objects for and add to m_rules_arr.
 	 Set ruleId referencing them.  */
@@ -608,10 +639,10 @@ make_reporting_descriptor_object_for_warning (diagnostic_context *context,
      it seems redundant compared to "id".  */
 
   /* "helpUri" property (SARIF v2.1.0 section 3.49.12).  */
-  if (context->get_option_url)
+  if (context->m_get_option_url)
     {
       char *option_url
-	= context->get_option_url (context, diagnostic->option_index);
+	= context->m_get_option_url (context, diagnostic->option_index);
       if (option_url)
 	{
 	  reporting_desc->set ("helpUri", new json::string (option_url));
@@ -699,9 +730,8 @@ sarif_builder::make_locations_arr (diagnostic_info *diagnostic)
 {
   json::array *locations_arr = new json::array ();
   const logical_location *logical_loc = NULL;
-  if (m_context->m_client_data_hooks)
-    logical_loc
-      = m_context->m_client_data_hooks->get_current_logical_location ();
+  if (auto client_data_hooks = m_context->get_client_data_hooks ())
+    logical_loc = client_data_hooks->get_current_logical_location ();
 
   json::object *location_obj
     = make_location_object (*diagnostic->richloc, logical_loc);
@@ -1091,41 +1121,44 @@ sarif_builder::make_code_flow_object (const diagnostic_path &path)
 {
   json::object *code_flow_obj = new json::object ();
 
-  /* "threadFlows" property (SARIF v2.1.0 section 3.36.3).
-     Currently we only support one thread per result.  */
+  /* "threadFlows" property (SARIF v2.1.0 section 3.36.3).  */
   json::array *thread_flows_arr = new json::array ();
-  json::object *thread_flow_obj = make_thread_flow_object (path);
-  thread_flows_arr->append (thread_flow_obj);
+
+  /* Walk the events, consolidating into per-thread threadFlow objects,
+     using the index with PATH as the overall executionOrder.  */
+  hash_map<int_hash<diagnostic_thread_id_t, -1, -2>,
+	   sarif_thread_flow *> thread_id_map;
+  for (unsigned i = 0; i < path.num_events (); i++)
+    {
+      const diagnostic_event &event = path.get_event (i);
+      const diagnostic_thread_id_t thread_id = event.get_thread_id ();
+      sarif_thread_flow *thread_flow_obj;
+
+      if (sarif_thread_flow **slot = thread_id_map.get (thread_id))
+	thread_flow_obj = *slot;
+      else
+	{
+	  const diagnostic_thread &thread = path.get_thread (thread_id);
+	  thread_flow_obj = new sarif_thread_flow (thread);
+	  thread_flows_arr->append (thread_flow_obj);
+	  thread_id_map.put (thread_id, thread_flow_obj);
+	}
+
+      /* Add event to thread's threadFlow object.  */
+      json::object *thread_flow_loc_obj
+	= make_thread_flow_location_object (event, i);
+      thread_flow_obj->add_location (thread_flow_loc_obj);
+    }
   code_flow_obj->set ("threadFlows", thread_flows_arr);
 
   return code_flow_obj;
 }
 
-/* Make a threadFlow object (SARIF v2.1.0 section 3.37) for PATH.  */
-
-json::object *
-sarif_builder::make_thread_flow_object (const diagnostic_path &path)
-{
-  json::object *thread_flow_obj = new json::object ();
-
-  /* "locations" property (SARIF v2.1.0 section 3.37.6).  */
-  json::array *locations_arr = new json::array ();
-  for (unsigned i = 0; i < path.num_events (); i++)
-    {
-      const diagnostic_event &event = path.get_event (i);
-      json::object *thread_flow_loc_obj
-	= make_thread_flow_location_object (event);
-      locations_arr->append (thread_flow_loc_obj);
-    }
-  thread_flow_obj->set ("locations", locations_arr);
-
-  return thread_flow_obj;
-}
-
 /* Make a threadFlowLocation object (SARIF v2.1.0 section 3.38) for EVENT.  */
 
 json::object *
-sarif_builder::make_thread_flow_location_object (const diagnostic_event &ev)
+sarif_builder::make_thread_flow_location_object (const diagnostic_event &ev,
+						 int path_event_idx)
 {
   json::object *thread_flow_loc_obj = new json::object ();
 
@@ -1141,6 +1174,11 @@ sarif_builder::make_thread_flow_location_object (const diagnostic_event &ev)
   /* "nestingLevel" property (SARIF v2.1.0 section 3.38.10).  */
   thread_flow_loc_obj->set ("nestingLevel",
 			    new json::integer_number (ev.get_stack_depth ()));
+
+  /* "executionOrder" property (SARIF v2.1.0 3.38.11).
+     Offset by 1 to match the human-readable values emitted by %@.  */
+  thread_flow_loc_obj->set ("executionOrder",
+			    new json::integer_number (path_event_idx + 1));
 
   /* It might be nice to eventually implement the following for -fanalyzer:
      - the "stack" property (SARIF v2.1.0 section 3.38.5)
@@ -1322,9 +1360,9 @@ sarif_builder::make_tool_object () const
 
   /* Report plugins via the "extensions" property
      (SARIF v2.1.0 section 3.18.3).  */
-  if (m_context->m_client_data_hooks)
+  if (auto client_data_hooks = m_context->get_client_data_hooks ())
     if (const client_version_info *vinfo
-	  = m_context->m_client_data_hooks->get_any_version_info ())
+	  = client_data_hooks->get_any_version_info ())
       {
 	class my_plugin_visitor : public client_version_info :: plugin_visitor
 	{
@@ -1375,9 +1413,9 @@ sarif_builder::make_driver_tool_component_object () const
 {
   json::object *driver_obj = new json::object ();
 
-  if (m_context->m_client_data_hooks)
+  if (auto client_data_hooks = m_context->get_client_data_hooks ())
     if (const client_version_info *vinfo
-	  = m_context->m_client_data_hooks->get_any_version_info ())
+	  = client_data_hooks->get_any_version_info ())
       {
 	/* "name" property (SARIF v2.1.0 section 3.19.8).  */
 	if (const char *name = vinfo->get_tool_name ())
@@ -1486,10 +1524,9 @@ sarif_builder::make_artifact_object (const char *filename)
     artifact_obj->set ("contents", artifact_content_obj);
 
   /* "sourceLanguage" property (SARIF v2.1.0 section 3.24.10).  */
-  if (m_context->m_client_data_hooks)
+  if (auto client_data_hooks = m_context->get_client_data_hooks ())
     if (const char *source_lang
-	= m_context->m_client_data_hooks->maybe_get_sarif_source_language
-	    (filename))
+	= client_data_hooks->maybe_get_sarif_source_language (filename))
       artifact_obj->set ("sourceLanguage", new json::string (source_lang));
 
   return artifact_obj;
@@ -1502,7 +1539,8 @@ json::object *
 sarif_builder::maybe_make_artifact_content_object (const char *filename) const
 {
   /* Let input.cc handle any charset conversion.  */
-  char_span utf8_content = get_source_file_content (filename);
+  char_span utf8_content
+    = m_context->get_file_cache ()->get_source_file_content (filename);
   if (!utf8_content)
     return NULL;
 
@@ -1520,16 +1558,17 @@ sarif_builder::maybe_make_artifact_content_object (const char *filename) const
 /* Attempt to read the given range of lines from FILENAME; return
    a freshly-allocated 0-terminated buffer containing them, or NULL.  */
 
-static char *
-get_source_lines (const char *filename,
-		  int start_line,
-		  int end_line)
+char *
+sarif_builder::get_source_lines (const char *filename,
+				 int start_line,
+				 int end_line) const
 {
   auto_vec<char> result;
 
   for (int line = start_line; line <= end_line; line++)
     {
-      char_span line_content = location_get_source_line (filename, line);
+      char_span line_content
+	= m_context->get_file_cache ()->get_source_line (filename, line);
       if (!line_content.get_buffer ())
 	return NULL;
       result.reserve (line_content.length () + 1);
@@ -1642,82 +1681,6 @@ sarif_builder::make_artifact_content_object (const char *text) const
   return content_obj;
 }
 
-/* No-op implementation of "begin_diagnostic" for SARIF output.  */
-
-static void
-sarif_begin_diagnostic (diagnostic_context *, diagnostic_info *)
-{
-}
-
-/* Implementation of "end_diagnostic" for SARIF output.  */
-
-static void
-sarif_end_diagnostic (diagnostic_context *context, diagnostic_info *diagnostic,
-		      diagnostic_t orig_diag_kind)
-{
-  gcc_assert (the_builder);
-  the_builder->end_diagnostic (context, diagnostic, orig_diag_kind);
-}
-
-/* No-op implementation of "begin_group_cb" for SARIF output.  */
-
-static void
-sarif_begin_group (diagnostic_context *)
-{
-}
-
-/* Implementation of "end_group_cb" for SARIF output.  */
-
-static void
-sarif_end_group (diagnostic_context *)
-{
-  gcc_assert (the_builder);
-  the_builder->end_group ();
-}
-
-/* Flush the top-level array to OUTF.  */
-
-static void
-sarif_flush_to_file (FILE *outf)
-{
-  gcc_assert (the_builder);
-  the_builder->flush_to_file (outf);
-  delete the_builder;
-  the_builder = NULL;
-}
-
-/* Callback for final cleanup for SARIF output to stderr.  */
-
-static void
-sarif_stderr_final_cb (diagnostic_context *)
-{
-  gcc_assert (the_builder);
-  sarif_flush_to_file (stderr);
-}
-
-static char *sarif_output_base_file_name;
-
-/* Callback for final cleanup for SARIF output to a file.  */
-
-static void
-sarif_file_final_cb (diagnostic_context *)
-{
-  char *filename = concat (sarif_output_base_file_name, ".sarif", NULL);
-  FILE *outf = fopen (filename, "w");
-  if (!outf)
-    {
-      const char *errstr = xstrerror (errno);
-      fnotice (stderr, "error: unable to open '%s' for writing: %s\n",
-	       filename, errstr);
-      free (filename);
-      return;
-    }
-  gcc_assert (the_builder);
-  sarif_flush_to_file (outf);
-  fclose (outf);
-  free (filename);
-}
-
 /* Callback for diagnostic_context::ice_handler_cb for when an ICE
    occurs.  */
 
@@ -1735,15 +1698,89 @@ sarif_ice_handler (diagnostic_context *context)
   fnotice (stderr, "Internal compiler error:\n");
 }
 
-/* Callback for diagnostic_context::m_diagrams.m_emission_cb.  */
-
-static void
-sarif_emit_diagram (diagnostic_context *context,
-		    const diagnostic_diagram &diagram)
+class sarif_output_format : public diagnostic_output_format
 {
-  gcc_assert (the_builder);
-  the_builder->emit_diagram (context, diagram);
-}
+public:
+  void on_begin_group () final override
+  {
+    /* No-op,  */
+  }
+  void on_end_group () final override
+  {
+    m_builder.end_group ();
+  }
+  void
+  on_begin_diagnostic (diagnostic_info *) final override
+  {
+    /* No-op,  */
+  }
+  void
+  on_end_diagnostic (diagnostic_info *diagnostic,
+		     diagnostic_t orig_diag_kind) final override
+  {
+    m_builder.end_diagnostic (&m_context, diagnostic, orig_diag_kind);
+  }
+  void on_diagram (const diagnostic_diagram &diagram) final override
+  {
+    m_builder.emit_diagram (&m_context, diagram);
+  }
+
+protected:
+  sarif_output_format (diagnostic_context &context)
+  : diagnostic_output_format (context),
+    m_builder (&context)
+  {}
+
+  sarif_builder m_builder;
+};
+
+class sarif_stream_output_format : public sarif_output_format
+{
+public:
+  sarif_stream_output_format (diagnostic_context &context, FILE *stream)
+  : sarif_output_format (context),
+    m_stream (stream)
+  {
+  }
+  ~sarif_stream_output_format ()
+  {
+    m_builder.flush_to_file (m_stream);
+  }
+private:
+  FILE *m_stream;
+};
+
+class sarif_file_output_format : public sarif_output_format
+{
+public:
+  sarif_file_output_format (diagnostic_context &context,
+			   const char *base_file_name)
+  : sarif_output_format (context),
+    m_base_file_name (xstrdup (base_file_name))
+  {
+  }
+  ~sarif_file_output_format ()
+  {
+    char *filename = concat (m_base_file_name, ".sarif", NULL);
+    free (m_base_file_name);
+    m_base_file_name = nullptr;
+    FILE *outf = fopen (filename, "w");
+    if (!outf)
+      {
+	const char *errstr = xstrerror (errno);
+	fnotice (stderr, "error: unable to open '%s' for writing: %s\n",
+		 filename, errstr);
+	free (filename);
+	return;
+      }
+    m_builder.flush_to_file (outf);
+    fclose (outf);
+    free (filename);
+  }
+
+private:
+  char *m_base_file_name;
+};
 
 /* Populate CONTEXT in preparation for SARIF output (either to stderr, or
    to a file).  */
@@ -1751,23 +1788,16 @@ sarif_emit_diagram (diagnostic_context *context,
 static void
 diagnostic_output_format_init_sarif (diagnostic_context *context)
 {
-  the_builder = new sarif_builder (context);
-
   /* Override callbacks.  */
-  context->begin_diagnostic = sarif_begin_diagnostic;
-  context->end_diagnostic = sarif_end_diagnostic;
-  context->begin_group_cb = sarif_begin_group;
-  context->end_group_cb =  sarif_end_group;
-  context->print_path = NULL; /* handled in sarif_end_diagnostic.  */
-  context->ice_handler_cb = sarif_ice_handler;
-  context->m_diagrams.m_emission_cb = sarif_emit_diagram;
+  context->m_print_path = nullptr; /* handled in sarif_end_diagnostic.  */
+  context->set_ice_handler_callback (sarif_ice_handler);
 
   /* The metadata is handled in SARIF format, rather than as text.  */
-  context->show_cwe = false;
-  context->show_rules = false;
+  context->set_show_cwe (false);
+  context->set_show_rules (false);
 
   /* The option is handled in SARIF format, rather than as text.  */
-  context->show_option_requested = false;
+  context->set_show_option_requested (false);
 
   /* Don't colorize the text.  */
   pp_show_color (context->printer) = false;
@@ -1779,7 +1809,8 @@ void
 diagnostic_output_format_init_sarif_stderr (diagnostic_context *context)
 {
   diagnostic_output_format_init_sarif (context);
-  context->final_cb = sarif_stderr_final_cb;
+  context->set_output_format (new sarif_stream_output_format (*context,
+							      stderr));
 }
 
 /* Populate CONTEXT in preparation for SARIF output to a file named
@@ -1787,9 +1818,20 @@ diagnostic_output_format_init_sarif_stderr (diagnostic_context *context)
 
 void
 diagnostic_output_format_init_sarif_file (diagnostic_context *context,
-					 const char *base_file_name)
+					  const char *base_file_name)
 {
   diagnostic_output_format_init_sarif (context);
-  context->final_cb = sarif_file_final_cb;
-  sarif_output_base_file_name = xstrdup (base_file_name);
+  context->set_output_format (new sarif_file_output_format (*context,
+							    base_file_name));
+}
+
+/* Populate CONTEXT in preparation for SARIF output to STREAM.  */
+
+void
+diagnostic_output_format_init_sarif_stream (diagnostic_context *context,
+					    FILE *stream)
+{
+  diagnostic_output_format_init_sarif (context);
+  context->set_output_format (new sarif_stream_output_format (*context,
+							      stream));
 }

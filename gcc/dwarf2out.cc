@@ -397,11 +397,9 @@ dump_struct_debug (tree type, enum debug_info_usage usage,
    of the number.  */
 
 static unsigned int
-get_full_len (const wide_int &op)
+get_full_len (const dw_wide_int &op)
 {
-  int prec = wi::get_precision (op);
-  return ((prec + HOST_BITS_PER_WIDE_INT - 1)
-	  / HOST_BITS_PER_WIDE_INT);
+  return CEIL (op.get_precision (), HOST_BITS_PER_WIDE_INT);
 }
 
 static bool
@@ -3900,7 +3898,7 @@ static void add_data_member_location_attribute (dw_die_ref, tree,
 						struct vlr_context *);
 static bool add_const_value_attribute (dw_die_ref, machine_mode, rtx);
 static void insert_int (HOST_WIDE_INT, unsigned, unsigned char *);
-static void insert_wide_int (const wide_int &, unsigned char *, int);
+static void insert_wide_int (const wide_int_ref &, unsigned char *, int);
 static unsigned insert_float (const_rtx, unsigned char *);
 static rtx rtl_for_decl_location (tree);
 static bool add_location_or_const_value_attribute (dw_die_ref, tree, bool);
@@ -4594,19 +4592,31 @@ AT_unsigned (dw_attr_node *a)
   return a->dw_attr_val.v.val_unsigned;
 }
 
+dw_wide_int *
+alloc_dw_wide_int (const wide_int_ref &w)
+{
+  dw_wide_int *p
+    = (dw_wide_int *) ggc_internal_alloc (sizeof (dw_wide_int)
+					  + ((w.get_len () - 1)
+					     * sizeof (HOST_WIDE_INT)));
+  p->precision = w.get_precision ();
+  p->len = w.get_len ();
+  memcpy (p->val, w.get_val (), p->len * sizeof (HOST_WIDE_INT));
+  return p;
+}
+
 /* Add an unsigned wide integer attribute value to a DIE.  */
 
 static inline void
 add_AT_wide (dw_die_ref die, enum dwarf_attribute attr_kind,
-	     const wide_int& w)
+	     const wide_int_ref &w)
 {
   dw_attr_node attr;
 
   attr.dw_attr = attr_kind;
   attr.dw_attr_val.val_class = dw_val_class_wide_int;
   attr.dw_attr_val.val_entry = NULL;
-  attr.dw_attr_val.v.val_wide = ggc_alloc<wide_int> ();
-  *attr.dw_attr_val.v.val_wide = w;
+  attr.dw_attr_val.v.val_wide = alloc_dw_wide_int (w);
   add_dwarf_attr (die, &attr);
 }
 
@@ -13298,6 +13308,14 @@ base_type_die (tree type, bool reverse)
       encoding = DW_ATE_boolean;
       break;
 
+    case BITINT_TYPE:
+      /* C23 _BitInt(N).  */
+      if (TYPE_UNSIGNED (type))
+	encoding = DW_ATE_unsigned;
+      else
+	encoding = DW_ATE_signed;
+      break;
+
     default:
       /* No other TREE_CODEs are Dwarf fundamental types.  */
       gcc_unreachable ();
@@ -13308,6 +13326,8 @@ base_type_die (tree type, bool reverse)
   add_AT_unsigned (base_type_result, DW_AT_byte_size,
 		   int_size_in_bytes (type));
   add_AT_unsigned (base_type_result, DW_AT_encoding, encoding);
+  if (TREE_CODE (type) == BITINT_TYPE)
+    add_AT_unsigned (base_type_result, DW_AT_bit_size, TYPE_PRECISION (type));
 
   if (need_endianity_attribute_p (reverse))
     add_AT_unsigned (base_type_result, DW_AT_endianity,
@@ -13392,6 +13412,7 @@ is_base_type (tree type)
     case FIXED_POINT_TYPE:
     case COMPLEX_TYPE:
     case BOOLEAN_TYPE:
+    case BITINT_TYPE:
       return true;
 
     case VOID_TYPE:
@@ -13990,12 +14011,24 @@ modified_type_die (tree type, int cv_quals, bool reverse,
 	name = DECL_NAME (name);
       add_name_attribute (mod_type_die, IDENTIFIER_POINTER (name));
     }
-  /* This probably indicates a bug.  */
   else if (mod_type_die && mod_type_die->die_tag == DW_TAG_base_type)
     {
-      name = TYPE_IDENTIFIER (type);
-      add_name_attribute (mod_type_die,
-			  name ? IDENTIFIER_POINTER (name) : "__unknown__");
+      if (TREE_CODE (type) == BITINT_TYPE)
+	{
+	  char name_buf[sizeof ("unsigned _BitInt(2147483647)")];
+	  snprintf (name_buf, sizeof (name_buf),
+		    "%s_BitInt(%d)", TYPE_UNSIGNED (type) ? "unsigned " : "",
+		    TYPE_PRECISION (type));
+	  add_name_attribute (mod_type_die, name_buf);
+	}
+      else
+	{
+	  /* This probably indicates a bug.  */
+	  name = TYPE_IDENTIFIER (type);
+	  add_name_attribute (mod_type_die,
+			      name
+			      ? IDENTIFIER_POINTER (name) : "__unknown__");
+	}
     }
 
   if (qualified_type && !reverse_base_type)
@@ -14278,7 +14311,9 @@ reg_loc_descriptor (rtx rtl, enum var_init_status initialized)
      argument pointer and soft frame pointer rtx's.
      Use DW_OP_fbreg offset DW_OP_stack_value in this case.  */
   if ((rtl == arg_pointer_rtx || rtl == frame_pointer_rtx)
-      && eliminate_regs (rtl, VOIDmode, NULL_RTX) != rtl)
+      && (ira_use_lra_p
+	  ? lra_eliminate_regs (rtl, VOIDmode, NULL_RTX)
+	  : eliminate_regs (rtl, VOIDmode, NULL_RTX)) != rtl)
     {
       dw_loc_descr_ref result = NULL;
 
@@ -15944,7 +15979,6 @@ mem_loc_descriptor (rtx rtl, machine_mode mode,
   enum dwarf_location_atom op;
   dw_loc_descr_ref op0, op1;
   rtx inner = NULL_RTX;
-  poly_int64 offset;
 
   if (mode == VOIDmode)
     mode = GET_MODE (rtl);
@@ -16692,8 +16726,8 @@ mem_loc_descriptor (rtx rtl, machine_mode mode,
 	  mem_loc_result->dw_loc_oprnd1.v.val_die_ref.external = 0;
 	  mem_loc_result->dw_loc_oprnd2.val_class
 	    = dw_val_class_wide_int;
-	  mem_loc_result->dw_loc_oprnd2.v.val_wide = ggc_alloc<wide_int> ();
-	  *mem_loc_result->dw_loc_oprnd2.v.val_wide = rtx_mode_t (rtl, mode);
+	  mem_loc_result->dw_loc_oprnd2.v.val_wide
+	    = alloc_dw_wide_int (rtx_mode_t (rtl, mode));
 	}
       break;
 
@@ -17266,8 +17300,8 @@ loc_descriptor (rtx rtl, machine_mode mode,
 	  loc_result = new_loc_descr (DW_OP_implicit_value,
 				      GET_MODE_SIZE (int_mode), 0);
 	  loc_result->dw_loc_oprnd2.val_class = dw_val_class_wide_int;
-	  loc_result->dw_loc_oprnd2.v.val_wide = ggc_alloc<wide_int> ();
-	  *loc_result->dw_loc_oprnd2.v.val_wide = rtx_mode_t (rtl, int_mode);
+	  loc_result->dw_loc_oprnd2.v.val_wide
+	    = alloc_dw_wide_int (rtx_mode_t (rtl, int_mode));
 	}
       break;
 
@@ -20167,7 +20201,7 @@ extract_int (const unsigned char *src, unsigned int size)
 /* Writes wide_int values to dw_vec_const array.  */
 
 static void
-insert_wide_int (const wide_int &val, unsigned char *dest, int elt_size)
+insert_wide_int (const wide_int_ref &val, unsigned char *dest, int elt_size)
 {
   int i;
 
@@ -20252,8 +20286,7 @@ add_const_value_attribute (dw_die_ref die, machine_mode mode, rtx rtl)
 	  && (GET_MODE_PRECISION (int_mode)
 	      & (HOST_BITS_PER_WIDE_INT - 1)) == 0)
 	{
-	  wide_int w = rtx_mode_t (rtl, int_mode);
-	  add_AT_wide (die, DW_AT_const_value, w);
+	  add_AT_wide (die, DW_AT_const_value, rtx_mode_t (rtl, int_mode));
 	  return true;
 	}
       return false;
@@ -20522,6 +20555,17 @@ rtl_for_decl_init (tree init, tree type)
 	  default:
 	    return NULL;
 	  }
+
+      /* Large _BitInt BLKmode INTEGER_CSTs would yield a MEM.  */
+      if (TREE_CODE (init) == INTEGER_CST
+	  && TREE_CODE (TREE_TYPE (init)) == BITINT_TYPE
+	  && TYPE_MODE (TREE_TYPE (init)) == BLKmode)
+	{
+	  if (tree_fits_shwi_p (init))
+	    return GEN_INT (tree_to_shwi (init));
+	  else
+	    return NULL;
+	}
 
       rtl = expand_expr (init, NULL_RTX, VOIDmode, EXPAND_INITIALIZER);
 
@@ -25122,8 +25166,8 @@ highest_c_language (const char *lang1, const char *lang2)
   if (strcmp ("GNU C++98", lang1) == 0 || strcmp ("GNU C++98", lang2) == 0)
     return "GNU C++98";
 
-  if (strcmp ("GNU C2X", lang1) == 0 || strcmp ("GNU C2X", lang2) == 0)
-    return "GNU C2X";
+  if (strcmp ("GNU C23", lang1) == 0 || strcmp ("GNU C23", lang2) == 0)
+    return "GNU C23";
   if (strcmp ("GNU C17", lang1) == 0 || strcmp ("GNU C17", lang2) == 0)
     return "GNU C17";
   if (strcmp ("GNU C11", lang1) == 0 || strcmp ("GNU C11", lang2) == 0)
@@ -25204,7 +25248,7 @@ gen_compile_unit_die (const char *filename)
 	  if (dwarf_version >= 5 /* || !dwarf_strict */)
 	    if (strcmp (language_string, "GNU C11") == 0
 		|| strcmp (language_string, "GNU C17") == 0
-		|| strcmp (language_string, "GNU C2X") == 0)
+		|| strcmp (language_string, "GNU C23") == 0)
 	      language = DW_LANG_C11;
 	}
     }
@@ -26361,6 +26405,7 @@ gen_type_die_with_usage (tree type, dw_die_ref context_die,
     case FIXED_POINT_TYPE:
     case COMPLEX_TYPE:
     case BOOLEAN_TYPE:
+    case BITINT_TYPE:
       /* No DIEs needed for fundamental types.  */
       break;
 
@@ -29212,6 +29257,7 @@ output_macinfo (const char *debug_line_label, bool early_lto_debug)
 	case DW_MACINFO_define:
 	case DW_MACINFO_undef:
 	  if ((!dwarf_strict || dwarf_version >= 5)
+	      && !dwarf_split_debug_info
 	      && HAVE_COMDAT_GROUP
 	      && vec_safe_length (files) != 1
 	      && i > 0
@@ -30141,8 +30187,13 @@ prune_unused_types_walk (dw_die_ref die)
     case DW_TAG_reference_type:
     case DW_TAG_rvalue_reference_type:
     case DW_TAG_volatile_type:
+    case DW_TAG_restrict_type:
+    case DW_TAG_shared_type:
+    case DW_TAG_atomic_type:
+    case DW_TAG_immutable_type:
     case DW_TAG_typedef:
     case DW_TAG_array_type:
+    case DW_TAG_coarray_type:
     case DW_TAG_friend:
     case DW_TAG_enumeration_type:
     case DW_TAG_subroutine_type:
@@ -30151,6 +30202,8 @@ prune_unused_types_walk (dw_die_ref die)
     case DW_TAG_subrange_type:
     case DW_TAG_ptr_to_member_type:
     case DW_TAG_file_type:
+    case DW_TAG_unspecified_type:
+    case DW_TAG_dynamic_type:
       /* Type nodes are useful only when other DIEs reference them --- don't
 	 mark them.  */
       /* FALLTHROUGH */

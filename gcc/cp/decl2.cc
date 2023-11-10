@@ -427,14 +427,8 @@ grok_array_decl (location_t loc, tree array_expr, tree index_exp,
 	  return build_min_nt_loc (loc, ARRAY_REF, array_expr, index_exp,
 				   NULL_TREE, NULL_TREE);
 	}
-      array_expr = build_non_dependent_expr (array_expr);
-      if (index_exp)
-	index_exp = build_non_dependent_expr (index_exp);
-      else
-	{
-	  orig_index_exp_list = make_tree_vector_copy (*index_exp_list);
-	  make_args_non_dependent (*index_exp_list);
-	}
+      if (!index_exp)
+	orig_index_exp_list = make_tree_vector_copy (*index_exp_list);
     }
 
   type = TREE_TYPE (array_expr);
@@ -459,7 +453,10 @@ grok_array_decl (location_t loc, tree array_expr, tree index_exp,
 	{
 	  expr = build_op_subscript (loc, array_expr, index_exp_list,
 				     &overload, complain & tf_decltype);
-	  if (expr == error_mark_node)
+	  if (expr == error_mark_node
+	      /* Don't do the backward compatibility fallback in a SFINAE
+		 context.   */
+	      && (complain & tf_error))
 	    {
 	      tree idx = build_x_compound_expr_from_vec (*index_exp_list, NULL,
 							 tf_none);
@@ -510,6 +507,11 @@ grok_array_decl (location_t loc, tree array_expr, tree index_exp,
 
       if (index_exp == NULL_TREE)
 	{
+	  if (!(complain & tf_error))
+	    /* Don't do the backward compatibility fallback in a SFINAE
+	       context.  */
+	    return error_mark_node;
+
 	  if ((*index_exp_list)->is_empty ())
 	    {
 	      error_at (loc, "built-in subscript operator without expression "
@@ -561,8 +563,9 @@ grok_array_decl (location_t loc, tree array_expr, tree index_exp,
 	swapped = true, array_expr = p2, index_exp = i1;
       else
 	{
-	  error_at (loc, "invalid types %<%T[%T]%> for array subscript",
-		    type, TREE_TYPE (index_exp));
+	  if (complain & tf_error)
+	    error_at (loc, "invalid types %<%T[%T]%> for array subscript",
+		      type, TREE_TYPE (index_exp));
 	  return error_mark_node;
 	}
 
@@ -1604,6 +1607,50 @@ cp_check_const_attributes (tree attributes)
     }
 }
 
+/* Copies hot or cold attributes to a function FN if present on the
+   encapsulating class, struct, or union TYPE.  */
+
+void
+maybe_propagate_warmth_attributes (tree fn, tree type)
+{
+  if (fn == NULL_TREE || type == NULL_TREE
+      || !(TREE_CODE (type) == RECORD_TYPE
+	   || TREE_CODE (type) == UNION_TYPE))
+    return;
+
+  tree has_cold_attr = lookup_attribute ("cold", TYPE_ATTRIBUTES (type));
+  tree has_hot_attr = lookup_attribute ("hot", TYPE_ATTRIBUTES (type));
+
+  if (has_cold_attr || has_hot_attr)
+    {
+      /* Transparently ignore the new warmth attribute if it
+	 conflicts with a present function attribute.  Otherwise
+	 decl_attribute would still honour the present attribute,
+	 but producing an undesired warning in the process.  */
+
+      if (has_cold_attr)
+	{
+	  if (lookup_attribute ("hot", DECL_ATTRIBUTES (fn)) == NULL)
+	    {
+	      tree cold_cons
+		= tree_cons (get_identifier ("cold"), NULL, NULL);
+
+	      decl_attributes (&fn, cold_cons, 0);
+	    }
+	}
+      else if (has_hot_attr)
+	{
+	  if (lookup_attribute ("cold", DECL_ATTRIBUTES (fn)) == NULL)
+	    {
+	      tree hot_cons
+		= tree_cons (get_identifier ("hot"), NULL, NULL);
+
+	      decl_attributes (&fn, hot_cons, 0);
+	    }
+	}
+    }
+}
+
 /* Return the last pushed declaration for the symbol DECL or NULL
    when no such declaration exists.  */
 
@@ -1715,6 +1762,12 @@ cplus_decl_attributes (tree *decl, tree attributes, int flags)
 		attributes
 		  = tree_cons (get_identifier ("omp declare target nohost"),
 			       NULL_TREE, attributes);
+	      if (last.indirect
+		  && !lookup_attribute ("omp declare target indirect",
+					attributes))
+		attributes
+		  = tree_cons (get_identifier ("omp declare target indirect"),
+			       NULL_TREE, attributes);
 	    }
 	}
     }
@@ -1738,16 +1791,34 @@ cplus_decl_attributes (tree *decl, tree attributes, int flags)
 	    {
 	      tree name = get_attribute_name (*pa);
 	      if (is_attribute_p ("directive", name)
-		  || is_attribute_p ("sequence", name))
+		  || is_attribute_p ("sequence", name)
+		  || is_attribute_p ("decl", name))
 		{
-		  if (!diagnosed)
+		  const char *p = NULL;
+		  if (TREE_VALUE (*pa) == NULL_TREE)
+		    p = IDENTIFIER_POINTER (name);
+		  for (tree a = TREE_VALUE (*pa); a; a = TREE_CHAIN (a))
 		    {
-		      error ("%<omp::%E%> not allowed to be specified in this "
-			     "context", name);
+		      tree d = TREE_VALUE (a);
+		      gcc_assert (TREE_CODE (d) == DEFERRED_PARSE);
+		      if (TREE_PUBLIC (d)
+			  && (VAR_P (*decl)
+			      || TREE_CODE (*decl) == FUNCTION_DECL)
+			  && cp_maybe_parse_omp_decl (*decl, d))
+			continue;
+		      p = TREE_PUBLIC (d) ? "decl" : "directive";
+		    }
+		  if (p && !diagnosed)
+		    {
+		      error ("%<omp::%s%> not allowed to be specified in "
+			     "this context", p);
 		      diagnosed = true;
 		    }
-		  *pa = TREE_CHAIN (*pa);
-		  continue;
+		  if (p)
+		    {
+		      *pa = TREE_CHAIN (*pa);
+		      continue;
+		    }
 		}
 	    }
 	  pa = &TREE_CHAIN (*pa);
@@ -5364,18 +5435,13 @@ build_offset_ref_call_from_tree (tree fn, vec<tree, va_gc> **args,
       orig_args = make_tree_vector_copy (*args);
 
       /* Transform the arguments and add the implicit "this"
-	 parameter.  That must be done before the FN is transformed
-	 because we depend on the form of FN.  */
-      make_args_non_dependent (*args);
-      object = build_non_dependent_expr (object);
+	 parameter.  */
       if (TREE_CODE (TREE_TYPE (fn)) == METHOD_TYPE)
 	{
 	  if (TREE_CODE (fn) == DOTSTAR_EXPR)
 	    object = cp_build_addr_expr (object, complain);
 	  vec_safe_insert (*args, 0, object);
 	}
-      /* Now that the arguments are done, transform FN.  */
-      fn = build_non_dependent_expr (fn);
     }
 
   /* A qualified name corresponding to a bound pointer-to-member is

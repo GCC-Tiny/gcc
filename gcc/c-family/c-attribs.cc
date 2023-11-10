@@ -136,6 +136,7 @@ static tree handle_vector_mask_attribute (tree *, tree, tree, int,
 static tree handle_nonnull_attribute (tree *, tree, tree, int, bool *);
 static tree handle_nonstring_attribute (tree *, tree, tree, int, bool *);
 static tree handle_nothrow_attribute (tree *, tree, tree, int, bool *);
+static tree handle_expected_throw_attribute (tree *, tree, tree, int, bool *);
 static tree handle_cleanup_attribute (tree *, tree, tree, int, bool *);
 static tree handle_warn_unused_result_attribute (tree *, tree, tree, int,
 						 bool *);
@@ -177,6 +178,7 @@ static tree handle_signed_bool_precision_attribute (tree *, tree, tree, int,
 						    bool *);
 static tree handle_retain_attribute (tree *, tree, tree, int, bool *);
 static tree handle_fd_arg_attribute (tree *, tree, tree, int, bool *);
+static tree handle_null_terminated_string_arg_attribute (tree *, tree, tree, int, bool *);
 
 /* Helper to define attribute exclusions.  */
 #define ATTR_EXCL(name, function, type, variable)	\
@@ -437,6 +439,8 @@ const struct attribute_spec c_common_attribute_table[] =
 			      handle_nonstring_attribute, NULL },
   { "nothrow",                0, 0, true,  false, false, false,
 			      handle_nothrow_attribute, NULL },
+  { "expected_throw",         0, 0, true,  false, false, false,
+			      handle_expected_throw_attribute, NULL },
   { "may_alias",	      0, 0, false, true, false, false, NULL, NULL },
   { "cleanup",		      1, 1, true, false, false, false,
 			      handle_cleanup_attribute, NULL },
@@ -452,10 +456,10 @@ const struct attribute_spec c_common_attribute_table[] =
   { "alloc_size",	      1, 2, false, true, true, false,
 			      handle_alloc_size_attribute,
 	                      attr_alloc_exclusions },
-  { "cold",                   0, 0, true,  false, false, false,
+  { "cold",		      0, 0, false,  false, false, false,
 			      handle_cold_attribute,
 	                      attr_cold_hot_exclusions },
-  { "hot",                    0, 0, true,  false, false, false,
+  { "hot",		      0, 0, false,  false, false, false,
 			      handle_hot_attribute,
 	                      attr_cold_hot_exclusions },
   { "no_address_safety_analysis",
@@ -518,6 +522,8 @@ const struct attribute_spec c_common_attribute_table[] =
 			      handle_omp_declare_target_attribute, NULL },
   { "omp declare target implicit", 0, 0, true, false, false, false,
 			      handle_omp_declare_target_attribute, NULL },
+  { "omp declare target indirect", 0, 0, true, false, false, false,
+			      handle_omp_declare_target_attribute, NULL },
   { "omp declare target host", 0, 0, true, false, false, false,
 			      handle_omp_declare_target_attribute, NULL },
   { "omp declare target nohost", 0, 0, true, false, false, false,
@@ -569,6 +575,8 @@ const struct attribute_spec c_common_attribute_table[] =
             handle_fd_arg_attribute, NULL},
   { "fd_arg_write",       1, 1, false, true, true, false,
             handle_fd_arg_attribute, NULL},         
+  { "null_terminated_string_arg", 1, 1, false, true, true, false,
+			      handle_null_terminated_string_arg_attribute, NULL},
   { NULL,                     0, 0, false, false, false, false, NULL, NULL }
 };
 
@@ -1110,6 +1118,29 @@ handle_hot_attribute (tree *node, tree name, tree ARG_UNUSED (args),
     {
       /* Attribute hot processing is done later with lookup_attribute.  */
     }
+  else if ((TREE_CODE (*node) == RECORD_TYPE
+	    || TREE_CODE (*node) == UNION_TYPE)
+	   && c_dialect_cxx ()
+	   && (flags & (int) ATTR_FLAG_TYPE_IN_PLACE))
+    {
+      /* Check conflict here as decl_attributes will otherwise only catch
+	 it late at the function when the attribute is used on a class.  */
+      tree cold_attr = lookup_attribute ("cold", TYPE_ATTRIBUTES (*node));
+      if (cold_attr)
+	{
+	  warning (OPT_Wattributes, "ignoring attribute %qE because it "
+		   "conflicts with attribute %qs", name, "cold");
+	  *no_add_attrs = true;
+	}
+    }
+  else if (flags & ((int) ATTR_FLAG_FUNCTION_NEXT
+		    | (int) ATTR_FLAG_DECL_NEXT))
+    {
+	/* Avoid applying the attribute to a function return type when
+	   used as:  void __attribute ((hot)) foo (void).  It will be
+	   passed to the function.  */
+	*no_add_attrs = true;
+    }
   else
     {
       warning (OPT_Wattributes, "%qE attribute ignored", name);
@@ -1130,6 +1161,29 @@ handle_cold_attribute (tree *node, tree name, tree ARG_UNUSED (args),
       || TREE_CODE (*node) == LABEL_DECL)
     {
       /* Attribute cold processing is done later with lookup_attribute.  */
+    }
+  else if ((TREE_CODE (*node) == RECORD_TYPE
+	    || TREE_CODE (*node) == UNION_TYPE)
+	   && c_dialect_cxx ()
+	   && (flags & (int) ATTR_FLAG_TYPE_IN_PLACE))
+    {
+      /* Check conflict here as decl_attributes will otherwise only catch
+	 it late at the function when the attribute is used on a class.  */
+      tree hot_attr = lookup_attribute ("hot", TYPE_ATTRIBUTES (*node));
+      if (hot_attr)
+	{
+	  warning (OPT_Wattributes, "ignoring attribute %qE because it "
+		   "conflicts with attribute %qs", name, "hot");
+	  *no_add_attrs = true;
+	}
+    }
+  else if (flags & ((int) ATTR_FLAG_FUNCTION_NEXT
+		    | (int) ATTR_FLAG_DECL_NEXT))
+    {
+	/* Avoid applying the attribute to a function return type when
+	   used as:  void __attribute ((cold)) foo (void).  It will be
+	   passed to the function.  */
+	*no_add_attrs = true;
     }
   else
     {
@@ -4366,7 +4420,8 @@ type_valid_for_vector_size (tree type, tree atname, tree args,
 	  && GET_MODE_CLASS (orig_mode) != MODE_INT
 	  && !ALL_SCALAR_FIXED_POINT_MODE_P (orig_mode))
       || !tree_fits_uhwi_p (TYPE_SIZE_UNIT (type))
-      || TREE_CODE (type) == BOOLEAN_TYPE)
+      || TREE_CODE (type) == BOOLEAN_TYPE
+      || TREE_CODE (type) == BITINT_TYPE)
     {
       if (error_p)
 	error ("invalid vector type for attribute %qE", atname);
@@ -4607,6 +4662,20 @@ handle_fd_arg_attribute (tree *node, tree name, tree args,
       return NULL_TREE;
 
   *no_add_attrs = true;  
+  return NULL_TREE;
+}
+
+/* Handle the "null_terminated_string_arg" attribute.  */
+
+static tree
+handle_null_terminated_string_arg_attribute (tree *node, tree name, tree args,
+					     int ARG_UNUSED (flags),
+					     bool *no_add_attrs)
+{
+  if (positional_argument (*node, name, TREE_VALUE (args), POINTER_TYPE))
+    return NULL_TREE;
+
+  *no_add_attrs = true;
   return NULL_TREE;
 }
 
@@ -5402,6 +5471,25 @@ handle_nothrow_attribute (tree *node, tree name, tree ARG_UNUSED (args),
 {
   if (TREE_CODE (*node) == FUNCTION_DECL)
     TREE_NOTHROW (*node) = 1;
+  /* ??? TODO: Support types.  */
+  else
+    {
+      warning (OPT_Wattributes, "%qE attribute ignored", name);
+      *no_add_attrs = true;
+    }
+
+  return NULL_TREE;
+}
+
+/* Handle a "nothrow" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_expected_throw_attribute (tree *node, tree name, tree ARG_UNUSED (args),
+				 int ARG_UNUSED (flags), bool *no_add_attrs)
+{
+  if (TREE_CODE (*node) == FUNCTION_DECL)
+    /* No flag to set here.  */;
   /* ??? TODO: Support types.  */
   else
     {

@@ -46,6 +46,7 @@ with Inline;         use Inline;
 with Itypes;         use Itypes;
 with Lib;            use Lib;
 with Lib.Xref;       use Lib.Xref;
+with Local_Restrict;
 with Namet;          use Namet;
 with Nmake;          use Nmake;
 with Nlists;         use Nlists;
@@ -5450,7 +5451,7 @@ package body Sem_Res is
          --  of the current b-i-p implementation to unify the handling for
          --  multiple kinds of storage pools). ???
 
-         if Is_Limited_View (Desig_T)
+         if Is_Inherently_Limited_Type (Desig_T)
            and then Nkind (Expression (E)) = N_Function_Call
          then
             declare
@@ -5715,7 +5716,7 @@ package body Sem_Res is
 
                   if Ada_Version >= Ada_2012
                     and then Is_Limited_Type (Desig_T)
-                    and then not Is_Limited_View (Scope (Discr))
+                    and then not Is_Inherently_Limited_Type (Scope (Discr))
                   then
                      Error_Msg_N
                        ("only immutably limited types can have anonymous "
@@ -6582,6 +6583,9 @@ package body Sem_Res is
       if Is_Entity_Name (Subp)
         and then not In_Spec_Expression
         and then not Is_Expression_Function_Or_Completion (Current_Scope)
+        and then not (Chars (Current_Scope) = Name_uWrapped_Statements
+                       and then Is_Expression_Function_Or_Completion
+                                  (Scope (Current_Scope)))
         and then
           (not Is_Expression_Function_Or_Completion (Entity (Subp))
             or else Expander_Active)
@@ -6778,6 +6782,13 @@ package body Sem_Res is
 
       if Is_Ghost_Entity (Nam) and then Comes_From_Source (N) then
          Check_Ghost_Context (Nam, N);
+      end if;
+
+      if Is_Entity_Name (Subp) then
+         Local_Restrict.Check_Call
+           (Call => N, Callee => Ultimate_Alias (Nam));
+      else
+         Local_Restrict.Check_Call (Call => N);
       end if;
 
       --  If we are calling the current subprogram from immediately within its
@@ -7600,6 +7611,7 @@ package body Sem_Res is
 
       Resolve (L, T);
       Resolve (R, T);
+      Set_Compare_Type (N, T);
       Check_Unset_Reference (L);
       Check_Unset_Reference (R);
       Generate_Operator_Reference (N, T);
@@ -9108,6 +9120,7 @@ package body Sem_Res is
 
          Resolve (L, T);
          Resolve (R, T);
+         Set_Compare_Type (N, T);
 
          --  AI12-0413: user-defined primitive equality of an untagged record
          --  type hides the predefined equality operator, including within a
@@ -12671,6 +12684,7 @@ package body Sem_Res is
       if Warn_On_Suspicious_Modulus_Value
         and then Nkind (N) = N_Op_Minus
         and then Nkind (R) = N_Integer_Literal
+        and then Comes_From_Source (R)
         and then Is_Modular_Integer_Type (B_Typ)
         and then Nkind (Parent (N)) not in N_Qualified_Expression
                                          | N_Type_Conversion

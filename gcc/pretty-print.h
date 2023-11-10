@@ -31,15 +31,29 @@ along with GCC; see the file COPYING3.  If not see
    along with a list of things.  */
 struct text_info
 {
-  const char *format_spec;
-  va_list *args_ptr;
-  int err_no;  /* for %m */
-  void **x_data;
-  rich_location *m_richloc;
+  text_info () = default;
+  text_info (const char *format_spec,
+	     va_list *args_ptr,
+	     int err_no,
+	     void **data = nullptr,
+	     rich_location *rich_loc = nullptr)
+  : m_format_spec (format_spec),
+    m_args_ptr (args_ptr),
+    m_err_no (err_no),
+    m_data (data),
+    m_richloc (rich_loc)
+  {
+  }
 
   void set_location (unsigned int idx, location_t loc,
 		     enum range_display_kind range_display_kind);
   location_t get_location (unsigned int index_of_location) const;
+
+  const char *m_format_spec;
+  va_list *m_args_ptr;
+  int m_err_no;  /* for %m */
+  void **m_data;
+  rich_location *m_richloc;
 };
 
 /* How often diagnostics are prefixed by their locations:
@@ -214,6 +228,8 @@ class format_postprocessor
 /* True if colors should be shown.  */
 #define pp_show_color(PP) (PP)->show_color
 
+class urlifier;
+
 /* The data structure that contains the bare minimum required to do
    proper pretty-printing.  Clients may derived from this structure
    and add additional fields they need.  */
@@ -281,6 +297,10 @@ public:
 
   /* Whether URLs should be emitted, and which terminator to use.  */
   diagnostic_url_format url_format;
+
+  /* If true, then we've had a pp_begin_url (nullptr), and so the
+     next pp_end_url should be a no-op.  */
+  bool m_skipping_null_url;
 };
 
 inline const char *
@@ -333,13 +353,6 @@ pp_get_prefix (const pretty_printer *pp) { return pp->prefix; }
 #define pp_decimal_int(PP, I)  pp_scalar (PP, "%d", I)
 #define pp_unsigned_wide_integer(PP, I) \
    pp_scalar (PP, HOST_WIDE_INT_PRINT_UNSIGNED, (unsigned HOST_WIDE_INT) I)
-#define pp_wide_int(PP, W, SGN)					\
-  do								\
-    {								\
-      print_dec (W, pp_buffer (PP)->digit_buffer, SGN);		\
-      pp_string (PP, pp_buffer (PP)->digit_buffer);		\
-    }								\
-  while (0)
 #define pp_vrange(PP, R)					\
   do								\
     {								\
@@ -393,7 +406,8 @@ extern void pp_verbatim (pretty_printer *, const char *, ...)
      ATTRIBUTE_GCC_PPDIAG(2,3);
 extern void pp_flush (pretty_printer *);
 extern void pp_really_flush (pretty_printer *);
-extern void pp_format (pretty_printer *, text_info *);
+extern void pp_format (pretty_printer *, text_info *,
+		       const urlifier * = nullptr);
 extern void pp_output_formatted_text (pretty_printer *);
 extern void pp_format_verbatim (pretty_printer *, text_info *);
 
@@ -438,7 +452,21 @@ pp_wide_integer (pretty_printer *pp, HOST_WIDE_INT i)
   pp_scalar (pp, HOST_WIDE_INT_PRINT_DEC, i);
 }
 
+inline void
+pp_wide_int (pretty_printer *pp, const wide_int_ref &w, signop sgn)
+{
+  unsigned int len;
+  print_dec_buf_size (w, sgn, &len);
+  if (UNLIKELY (len > sizeof (pp_buffer (pp)->digit_buffer)))
+    pp_wide_int_large (pp, w, sgn);
+  else
+    {
+      print_dec (w, pp_buffer (pp)->digit_buffer, sgn);
+      pp_string (pp, pp_buffer (pp)->digit_buffer);
+    }
+}
+
 template<unsigned int N, typename T>
-void pp_wide_integer (pretty_printer *pp, const poly_int_pod<N, T> &);
+void pp_wide_integer (pretty_printer *pp, const poly_int<N, T> &);
 
 #endif /* GCC_PRETTY_PRINT_H */

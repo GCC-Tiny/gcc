@@ -91,7 +91,7 @@ m68k port		Andreas Schwab		<schwab@linux-m68k.org>
 m68k-motorola-sysv port	Philippe De Muyter	<phdm@macqel.be>
 mcore port		Nick Clifton		<nickc@redhat.com>
 microblaze		Michael Eager		<eager@eagercon.com>
-mips port		YunQiang Su		<yunqiang.su@cipunited.com>
+mips port		YunQiang Su		<syq@gcc.gnu.org>
 mmix port		Hans-Peter Nilsson	<hp@bitrange.com>
 mn10300 port		Jeff Law		<jeffreyalaw@gmail.com>
 mn10300 port		Alexandre Oliva		<aoliva@gcc.gnu.org>
@@ -273,7 +273,7 @@ arc port		Claudiu Zissulescu	<claziss@synopsys.com>
 callgraph		Martin Jambor		<mjambor@suse.cz>
 C front end		Marek Polacek		<polacek@redhat.com>
 CTF, BTF		Indu Bhagat		<indu.bhagat@oracle.com>
-CTF, BTF		David Faust		<david.faust@oracle.com>
+CTF, BTF, bpf port	David Faust		<david.faust@oracle.com>
 dataflow		Paolo Bonzini		<bonzini@gnu.org>
 dataflow		Seongbae Park		<seongbae.park@gmail.com>
 dataflow		Kenneth Zadeck		<zadeck@naturalbridge.com>
@@ -411,6 +411,7 @@ Chris Fairles					<cfairles@gcc.gnu.org>
 Alessandro Fanfarillo				<fanfarillo.gcc@gmail.com>
 Changpeng Fang					<changpeng.fang@amd.com>
 Sam Feifer					<sfeifer@redhat.com>
+Eric Feng						<ef2648@columbia.edu>
 Li Feng						<nemokingdom@gmail.com>
 Thomas Fitzsimmons				<fitzsim@redhat.com>
 Alexander Fomin					<afomin.mailbox@gmail.com>
@@ -423,6 +424,7 @@ Gary Funck					<gary@intrepid.com>
 Pompapathi V Gadad				<Pompapathi.V.Gadad@nsc.com>
 Eric Gallager					<egall@gwmail.gwu.edu>
 Gopalasubramanian Ganesh			<Ganesh.Gopalasubramanian@amd.com>
+Fei Gao						<gaofei@eswincomputing.com>
 Kaveh Ghazi					<ghazi@gcc.gnu.org>
 Doug Gilmore					<Doug.Gilmore@imgtec.com>
 Matthew Gingell					<gingell@gnat.com>
@@ -443,6 +445,7 @@ Wei Guozhi					<carrot@google.com>
 Vineet Gupta					<vineetg@rivosinc.com>
 Naveen H.S					<naveenh@marvell.com>
 Mostafa Hagog					<hagog@gcc.gnu.org>
+Jivan Hakobyan					<jivanhakobyan9@gmail.com>
 Andrew Haley					<aph@redhat.com>
 Frederik Harwath				<frederik@codesourcery.com>
 Stuart Hastings					<stuart@apple.com>
@@ -489,7 +492,7 @@ Kean Johnston					<jkj@sco.com>
 Phillip Jordan					<phillip.m.jordan@gmail.com>
 Tim Josling					<tej@melbpc.org.au>
 Victor Kaplansky				<victork@il.ibm.com>
-Filip Kastl					<filip.kastl@gmail.com>
+Filip Kastl					<fkastl@suse.cz>
 Geoffrey Keating				<geoffk@geoffk.org>
 Brendan Kehoe					<brendan@zen.org>
 Andi Kleen					<andi@firstfloor.org>
@@ -538,8 +541,9 @@ Ralph Loader					<rcl@ihug.co.nz>
 Sheldon Lobo					<sheldon.lobo@oracle.com
 Gabor Loki					<loki@inf.u-szeged.hu>
 Manuel López-Ibáñez				<manu@gcc.gnu.org>
-Carl Love					<cel@us.ibm.com>
+Carl Love					<cel@linux.ibm.com>
 Martin v. Löwis					<loewis@informatik.hu-berlin.de>
+Edwin Lu						<ewlu@rivosinc.com>
 H.J. Lu						<hjl.tools@gmail.com>
 Xiong Hu Luo					<luoxhu@gcc.gnu.org>
 Bin Bin Lv					<shlb@linux.ibm.com>
@@ -575,6 +579,7 @@ Brooks Moses					<bmoses@google.com>
 Dirk Mueller					<dmueller@suse.de>
 Phil Muldoon					<pmuldoon@redhat.com>
 Gaius Mulley					<gaiusmod2@gmail.com>
+Christoph Müllner				<christoph.muellner@vrull.eu>
 Steven Munroe					<munroesj52@gmail.com>
 Szabolcs Nagy					<szabolcs.nagy@arm.com>
 Victor Do Nascimento				<victor.donascimento@arm.com>
@@ -591,6 +596,7 @@ Carlos O'Donell					<carlos@redhat.com>
 Peter O'Gorman					<pogma@thewrittenword.com>
 Patrick O'Neill					<patrick@rivosinc.com>
 Braden Obrzut					<admin@maniacsvault.net>
+Tsukasa Oi					<research_trasio@irq.a4lg.com>
 Andrea Ornstein					<andrea.ornstein@st.com>
 Maxim Ostapenko					<m.ostapenko@samsung.com>
 Jeevitha Palanisamy				<jeevitha@linux.ibm.com>

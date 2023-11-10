@@ -80,6 +80,32 @@ public:
 
   /* The decl itself.  */
   tree GTY ((skip)) decl;
+
+  /* The overload hash of non-overloaded intrinsic is determined by
+     the overload name and argument list. Adding the overload name to
+     the hash is also to address the following situations:
+     vint16mf4_t  __riscv_vreinterpret_i16mf4 (vfloat16mf4_t src);
+     vuint16mf4_t __riscv_vreinterpret_u16mf4 (vfloat16mf4_t src);
+     The base, shape and argument list of the vreinterpret instance are
+     the same, only the overload name is different. Therefore, it is
+     enough to add overload_name and argument list to the hash value.*/
+  const char *overload_name;
+
+  /* The argument list part of the hash value. Add the unsigned/signed type
+     and machine mode of each argument to the hash value. */
+  vec<tree> GTY ((skip)) argument_types;
+
+  /* True if the decl represents an overloaded function that needs to be
+     resolved. */
+  bool overloaded_p;
+
+  /* The hash value to indicate the non-overloaded function. Generate hash value
+     based on overload_name and argument_types. */
+  hashval_t overloaded_hash () const;
+
+  /* Generate hash value based on the overload_name and the argument list passed
+     by the user when calling. */
+  hashval_t overloaded_hash (const vec<tree, va_gc> &);
 };
 
 /* Hash traits for registered_function.  */
@@ -87,6 +113,14 @@ struct registered_function_hasher : nofree_ptr_hash<registered_function>
 {
   typedef function_instance compare_type;
 
+  static hashval_t hash (value_type);
+  static bool equal (value_type, const compare_type &);
+};
+
+/* Hash traits for overload registered_function. */
+struct non_overloaded_registered_function_hasher
+  : nofree_ptr_hash<registered_function>
+{
   static hashval_t hash (value_type);
   static bool equal (value_type, const compare_type &);
 };
@@ -872,6 +906,15 @@ static CONSTEXPR const rvv_arg_type_info ext_x8_vget_args[]
 static CONSTEXPR const rvv_arg_type_info tuple_vset_args[]
   = {rvv_arg_type_info (RVV_BASE_vector), rvv_arg_type_info (RVV_BASE_size),
      rvv_arg_type_info (RVV_BASE_tuple_subpart), rvv_arg_type_info_end};
+
+/* A list of args for vector_type func (vector_type) function.  */
+static CONSTEXPR const rvv_arg_type_info tuple_vcreate_args[]
+  = {rvv_arg_type_info (RVV_BASE_tuple_subpart), rvv_arg_type_info_end};
+
+/* A list of args for vector_type func (vector_type) function.  */
+static CONSTEXPR const rvv_arg_type_info ext_vcreate_args[]
+  = {rvv_arg_type_info (RVV_BASE_vector),
+     rvv_arg_type_info_end};
 
 /* A list of none preds that will be registered for intrinsic functions.  */
 static CONSTEXPR const predication_type_index none_preds[]
@@ -2497,6 +2540,70 @@ static CONSTEXPR const rvv_op_info tuple_v_scalar_const_ptr_size_ptr_ops
      rvv_arg_type_info (RVV_BASE_vector), /* Return type */
      scalar_const_ptr_size_ptr_args /* Args */};
 
+/* A static operand information for vector_type func (vector_type)
+ * function registration. */
+static CONSTEXPR const rvv_op_info all_v_vcreate_tuple_ops
+  = {tuple_ops,				  /* Types */
+     OP_TYPE_v,				  /* Suffix */
+     rvv_arg_type_info (RVV_BASE_vector), /* Return type */
+     tuple_vcreate_args /* Args */};
+
+/* A static operand information for vector_type func () function registration.
+ */
+static CONSTEXPR const rvv_op_info all_none_void_tuple_ops
+  = {tuple_ops,				  /* Types */
+     OP_TYPE_none,			  /* Suffix */
+     rvv_arg_type_info (RVV_BASE_vector), /* Return type */
+     void_args /* Args */};
+
+/* A static operand information for vector_type func (vector_type)
+ * function registration. */
+static CONSTEXPR const rvv_op_info all_v_vcreate_lmul1_x2_ops
+  = {lmul1_ops,					/* Types */
+     OP_TYPE_v,					/* Suffix */
+     rvv_arg_type_info (RVV_BASE_vlmul_ext_x2), /* Return type */
+     ext_vcreate_args /* Args */};
+
+/* A static operand information for vector_type func (vector_type)
+ * function registration. */
+static CONSTEXPR const rvv_op_info all_v_vcreate_lmul1_x4_ops
+  = {lmul1_ops,					/* Types */
+     OP_TYPE_v,					/* Suffix */
+     rvv_arg_type_info (RVV_BASE_vlmul_ext_x4), /* Return type */
+     ext_vcreate_args /* Args */};
+
+/* A static operand information for vector_type func (vector_type)
+ * function registration. */
+static CONSTEXPR const rvv_op_info all_v_vcreate_lmul1_x8_ops
+  = {lmul1_ops,					/* Types */
+     OP_TYPE_v,					/* Suffix */
+     rvv_arg_type_info (RVV_BASE_vlmul_ext_x8), /* Return type */
+     ext_vcreate_args /* Args */};
+
+/* A static operand information for vector_type func (vector_type)
+ * function registration. */
+static CONSTEXPR const rvv_op_info all_v_vcreate_lmul2_x2_ops
+  = {lmul2_ops,					/* Types */
+     OP_TYPE_v,					/* Suffix */
+     rvv_arg_type_info (RVV_BASE_vlmul_ext_x2), /* Return type */
+     ext_vcreate_args /* Args */};
+
+/* A static operand information for vector_type func (vector_type)
+ * function registration. */
+static CONSTEXPR const rvv_op_info all_v_vcreate_lmul2_x4_ops
+  = {lmul2_ops,					/* Types */
+     OP_TYPE_v,					/* Suffix */
+     rvv_arg_type_info (RVV_BASE_vlmul_ext_x4), /* Return type */
+     ext_vcreate_args /* Args */};
+
+/* A static operand information for vector_type func (vector_type)
+ * function registration. */
+static CONSTEXPR const rvv_op_info all_v_vcreate_lmul4_x2_ops
+  = {lmul4_ops,					/* Types */
+     OP_TYPE_v,					/* Suffix */
+     rvv_arg_type_info (RVV_BASE_vlmul_ext_x2), /* Return type */
+     ext_vcreate_args /* Args */};
+
 /* A list of all RVV base function types.  */
 static CONSTEXPR const function_type_info function_types[] = {
 #define DEF_RVV_TYPE_INDEX(                                                    \
@@ -2599,6 +2706,12 @@ static GTY (()) vec<registered_function *, va_gc> *registered_functions;
    overloaded functions.  */
 static hash_table<registered_function_hasher> *function_table;
 
+/* All registered function decls, hashed on overload_name and argument list
+   of the registered_function.  This is used for looking up implementations
+   of non-overloaded functions. */
+static hash_table<non_overloaded_registered_function_hasher>
+  *non_overloaded_function_table;
+
 /* RAII class for enabling enough RVV features to define the built-in
    types and implement the riscv_vector.h pragma.
 
@@ -2671,7 +2784,7 @@ sizeless_type_p (const_tree type)
 
 /* If TYPE is an ABI-defined RVV type, return its attribute descriptor,
    otherwise return null.  */
-static tree
+tree
 lookup_vector_type_attribute (const_tree type)
 {
   if (type == error_mark_node)
@@ -3357,7 +3470,9 @@ function_builder::get_attributes (const function_instance &instance)
 registered_function &
 function_builder::add_function (const function_instance &instance,
 				const char *name, tree fntype, tree attrs,
-				bool placeholder_p)
+				bool placeholder_p, const char *overload_name,
+				const vec<tree> &argument_types,
+				bool overloaded_p = false)
 {
   unsigned int code = vec_safe_length (registered_functions);
   code = (code << RISCV_BUILTIN_SHIFT) + RISCV_BUILTIN_VECTOR;
@@ -3383,6 +3498,9 @@ function_builder::add_function (const function_instance &instance,
   registered_function &rfn = *ggc_alloc<registered_function> ();
   rfn.instance = instance;
   rfn.decl = decl;
+  rfn.overload_name = overload_name ? xstrdup (overload_name) : NULL;
+  rfn.argument_types = argument_types;
+  rfn.overloaded_p = overloaded_p;
   vec_safe_push (registered_functions, &rfn);
 
   return rfn;
@@ -3403,6 +3521,10 @@ function_builder::add_unique_function (const function_instance &instance,
   if (!check_required_extensions (instance))
     return;
 
+  /* Also add the function under its overloaded alias, if we want
+     a separate decl for each instance of an overloaded function.  */
+  char *overload_name = shape->get_name (*this, instance, true);
+
   /* Add the function under its full (unique) name.  */
   char *name = shape->get_name (*this, instance, false);
   tree fntype
@@ -3410,7 +3532,8 @@ function_builder::add_unique_function (const function_instance &instance,
 				 argument_types.address ());
   tree attrs = get_attributes (instance);
   registered_function &rfn
-    = add_function (instance, name, fntype, attrs, false);
+    = add_function (instance, name, fntype, attrs, false, overload_name,
+		    argument_types.copy ());
 
   /* Enter the function into the hash table.  */
   hashval_t hash = instance.hash ();
@@ -3419,17 +3542,43 @@ function_builder::add_unique_function (const function_instance &instance,
   gcc_assert (!*rfn_slot);
   *rfn_slot = &rfn;
 
-  /* Also add the function under its overloaded alias, if we want
-     a separate decl for each instance of an overloaded function.  */
-  char *overload_name = shape->get_name (*this, instance, true);
   if (overload_name)
     {
       /* Attribute lists shouldn't be shared.  */
       tree attrs = get_attributes (instance);
       bool placeholder_p = !m_direct_overloads;
-      add_function (instance, overload_name, fntype, attrs, placeholder_p);
+      add_function (instance, overload_name, fntype, attrs, placeholder_p, NULL,
+		    vNULL);
+
+      /* Enter the function into the non-overloaded hash table.  */
+      hash = rfn.overloaded_hash ();
+      rfn_slot = non_overloaded_function_table->find_slot_with_hash (&rfn, hash,
+								     INSERT);
+      gcc_assert (!*rfn_slot);
+      *rfn_slot = &rfn;
     }
   obstack_free (&m_string_obstack, name);
+}
+
+/* Add overloaded function for gcc. */
+void
+function_builder::add_overloaded_function (const function_instance &instance,
+					   const function_shape *shape)
+{
+  if (!check_required_extensions (instance))
+    return;
+
+  char *name = shape->get_name (*this, instance, true);
+
+  if (name)
+    {
+      /* To avoid API conflicting, take void return type and void argument
+	 for the overloaded function.  */
+      tree fntype = build_function_type (void_type_node, void_list_node);
+      add_function (instance, name, fntype, NULL_TREE, m_direct_overloads, name,
+		    vNULL, true);
+      obstack_free (&m_string_obstack, name);
+    }
 }
 
 function_call_info::function_call_info (location_t location_in,
@@ -3471,7 +3620,14 @@ function_expander::function_expander (const function_instance &instance,
     exp (exp_in), target (target_in), opno (0)
 {
   if (!function_returns_void_p ())
-    create_output_operand (&m_ops[opno++], target, TYPE_MODE (TREE_TYPE (exp)));
+    {
+      if (target != NULL_RTX && MEM_P (target))
+	/* Since there is no intrinsic where target is a mem operand, it
+	   should be converted to reg if it is a mem operand.  */
+	target = force_reg (GET_MODE (target), target);
+      create_output_operand (&m_ops[opno++], target,
+			     TYPE_MODE (TREE_TYPE (exp)));
+    }
 }
 
 /* Take argument ARGNO from EXP's argument list and convert it into
@@ -3730,17 +3886,29 @@ function_expander::use_ternop_insn (bool vd_accum_p, insn_code icode)
     }
 
   for (int argno = arg_offset; argno < call_expr_nargs (exp); argno++)
-    add_input_operand (argno);
+    {
+      if (base->has_rounding_mode_operand_p ()
+	  && argno == call_expr_nargs (exp) - 2)
+	{
+	  /* Since the rounding mode argument position is not consistent with
+	     the instruction pattern, we need to skip rounding mode argument
+	     here.  */
+	  continue;
+	}
+      add_input_operand (argno);
+    }
 
   add_input_operand (Pmode, get_tail_policy_for_pred (pred));
   add_input_operand (Pmode, get_mask_policy_for_pred (pred));
   add_input_operand (Pmode, get_avl_type_rtx (avl_type::NONVLMAX));
 
-  /* TODO: Currently, we don't support intrinsic that is modeling rounding mode.
-     We add default rounding mode for the intrinsics that didn't model rounding
-     mode yet.  */
+  if (base->has_rounding_mode_operand_p ())
+    add_input_operand (call_expr_nargs (exp) - 2);
+
+  /* The RVV floating-point only support dynamic rounding mode in the
+     FRM register.  */
   if (opno != insn_data[icode].n_generator_args)
-    add_input_operand (Pmode, const0_rtx);
+    add_input_operand (Pmode, gen_int_mode (riscv_vector::FRM_DYN, Pmode));
 
   return generate_insn (icode);
 }
@@ -3759,17 +3927,29 @@ function_expander::use_widen_ternop_insn (insn_code icode)
     add_all_one_mask_operand (mask_mode ());
 
   for (int argno = arg_offset; argno < call_expr_nargs (exp); argno++)
-    add_input_operand (argno);
+    {
+      if (base->has_rounding_mode_operand_p ()
+	  && argno == call_expr_nargs (exp) - 2)
+	{
+	  /* Since the rounding mode argument position is not consistent with
+	     the instruction pattern, we need to skip rounding mode argument
+	     here.  */
+	  continue;
+	}
+      add_input_operand (argno);
+    }
 
   add_input_operand (Pmode, get_tail_policy_for_pred (pred));
   add_input_operand (Pmode, get_mask_policy_for_pred (pred));
   add_input_operand (Pmode, get_avl_type_rtx (avl_type::NONVLMAX));
 
-  /* TODO: Currently, we don't support intrinsic that is modeling rounding mode.
-     We add default rounding mode for the intrinsics that didn't model rounding
-     mode yet.  */
+  if (base->has_rounding_mode_operand_p ())
+    add_input_operand (call_expr_nargs (exp) - 2);
+
+  /* The RVV floating-point only support dynamic rounding mode in the
+     FRM register.  */
   if (opno != insn_data[icode].n_generator_args)
-    add_input_operand (Pmode, const0_rtx);
+    add_input_operand (Pmode, gen_int_mode (riscv_vector::FRM_DYN, Pmode));
 
   return generate_insn (icode);
 }
@@ -3948,6 +4128,122 @@ registered_function_hasher::equal (value_type value, const compare_type &key)
   return value->instance == key;
 }
 
+hashval_t
+registered_function::overloaded_hash () const
+{
+  inchash::hash h;
+  tree type;
+  unsigned int unsigned_p, mode_p;
+  h.add (overload_name, strlen (overload_name));
+  for (unsigned int i = 0; i < argument_types.length (); i++)
+    {
+      type = argument_types[i];
+      unsigned_p = POINTER_TYPE_P (type) ? TYPE_UNSIGNED (TREE_TYPE (type))
+					 : TYPE_UNSIGNED (type);
+      mode_p = POINTER_TYPE_P (type) ? TYPE_MODE (TREE_TYPE (type))
+				     : TYPE_MODE (type);
+      h.add_int (unsigned_p);
+      h.add_int (mode_p);
+    }
+
+  return h.end ();
+}
+
+bool
+has_vxrm_or_frm_p (function_instance &instance, const vec<tree, va_gc> &arglist)
+{
+  if (instance.base->may_require_vxrm_p ()
+      || (instance.base->may_require_frm_p ()
+	  && (TREE_CODE (TREE_TYPE (arglist[arglist.length () - 2]))
+	      == INTEGER_TYPE)))
+    return true;
+  return false;
+}
+
+hashval_t
+registered_function::overloaded_hash (const vec<tree, va_gc> &arglist)
+{
+  argument_types = vNULL;
+  unsigned int len = arglist.length ();
+
+  for (unsigned int i = 0; i < len; i++)
+    {
+      /* vint8m1_t __riscv_vget_i8m1(vint8m2_t src, size_t index);
+	     When the user calls vget intrinsic, the __riscv_vget_i8m1(src, 1)
+       form is used. The compiler recognizes that the parameter index is signed
+       int, which is inconsistent with size_t, so the index is converted to
+       size_t type in order to get correct hash value. vint8m2_t
+       __riscv_vset(vint8m2_t dest, size_t index, vint8m1_t value); The reason
+       is the same as above. */
+      if ((instance.base == bases::vget && (i == (len - 1)))
+	  || (instance.base == bases::vset && (i == (len - 2))))
+	argument_types.safe_push (size_type_node);
+      /* Vector fixed-point arithmetic instructions requiring argument vxrm.
+	     For example: vuint32m4_t __riscv_vaaddu(vuint32m4_t vs2,
+      vuint32m4_t vs1, unsigned int vxrm, size_t vl); The user calls vaaddu
+      intrinsic in the form of __riscv_vaaddu(vs2, vs1, 2, vl). The compiler
+      recognizes that the parameter vxrm is a signed int, which is inconsistent
+      with the parameter unsigned int vxrm declared by intrinsic, so the
+      parameter vxrm is converted to an unsigned int type in order to get
+      correct hash value.
+
+      Vector Floating-Point Instructions requiring argument frm.
+      DEF_RVV_FUNCTION (vfadd, alu, full_preds, f_vvv_ops)
+      DEF_RVV_FUNCTION (vfadd_frm, alu_frm, full_preds, f_vvv_ops)
+      Taking vfadd as an example, theoretically we can add base or shape to the
+      hash value to distinguish whether the frm parameter is required.
+      vfloat32m1_t __riscv_vfadd(vfloat32m1_t vs2, float32_t rs1, size_t vl);
+      vfloat32m1_t __riscv_vfadd(vfloat32m1_t vs2, vfloat32m1_t vs1, unsigned int
+      frm, size_t vl);
+
+	    However, the current registration mechanism of overloaded intinsic for gcc
+      limits the intrinsic obtained by entering the hook to always be vfadd, not
+      vfadd_frm. Therefore, the correct hash value cannot be obtained through the
+      parameter list and overload name, base or shape.
+      +--------+---------------------------+-------------------+
+      | index  | name                      | kind              |
+      +--------+---------------------------+-------------------+
+      | 124733 | __riscv_vfadd             | Overloaded        | <- Hook fun code
+      +--------+---------------------------+-------------------+
+      | 124735 |  __riscv_vfadd_vv_f32m1   | Non-overloaded    |
+      +--------+---------------------------+-------------------+
+      | 124737 | __riscv_vfadd             | Placeholder       |
+      +--------+---------------------------+-------------------+
+      | ...                                                    |
+      +--------+---------------------------+-------------------+
+      | ...                                                    |
+      +--------+---------------------------+-------------------+
+      | 125739 | __riscv_vfadd             | Overloaded        |
+      +--------+---------------------------+-------------------+
+      | 125741 | __riscv_vfadd_vv_f32m1_rm | Non-overloaded    |
+      +--------+---------------------------+-------------------+
+      | 125743 | __riscv_vfadd             | Placeholder       |
+      +--------+---------------------------+-------------------+
+
+	    Therefore, the hash value cannot be added with base or shape, and needs
+      to be distinguished by whether the penultimate parameter is INTEGER_TYPE. */
+      else if (has_vxrm_or_frm_p (instance, arglist) && (i == (len - 2)))
+	argument_types.safe_push (unsigned_type_node);
+      else
+	argument_types.safe_push (TREE_TYPE (arglist[i]));
+    }
+  return overloaded_hash ();
+}
+
+inline hashval_t
+non_overloaded_registered_function_hasher::hash (value_type value)
+{
+  return value->overloaded_hash ();
+}
+
+inline bool
+non_overloaded_registered_function_hasher::equal (value_type value,
+						  const compare_type &key)
+{
+  return ((strcmp (value->overload_name, key->overload_name) == 0)
+	  && value->overloaded_hash () == key->overloaded_hash ());
+}
+
 /* If TYPE is a built-in type defined by the RVV ABI, return the mangled name,
    otherwise return NULL.  */
 const char *
@@ -3959,6 +4255,16 @@ mangle_builtin_type (const_tree type)
     if (tree id = TREE_VALUE (chain_index (0, TREE_VALUE (attr))))
       return IDENTIFIER_POINTER (id);
   return NULL;
+}
+
+/* Return true if TYPE is a built-in RVV type defined by the ABI.  */
+bool
+builtin_type_p (const_tree type)
+{
+  if (!type)
+    return false;
+
+  return lookup_vector_type_attribute (type);
 }
 
 /* Initialize all compiler built-ins related to RVV that should be
@@ -4086,7 +4392,7 @@ register_frm ()
 void
 handle_pragma_vector ()
 {
-  if (function_table)
+  if (function_table || non_overloaded_function_table)
     {
       error ("duplicate definition of %qs", "riscv_vector.h");
       return;
@@ -4103,6 +4409,8 @@ handle_pragma_vector ()
 
   /* Define the functions.  */
   function_table = new hash_table<registered_function_hasher> (1023);
+  non_overloaded_function_table
+    = new hash_table<non_overloaded_registered_function_hasher> (1023);
   function_builder builder;
   for (unsigned int i = 0; i < ARRAY_SIZE (function_groups); ++i)
     builder.register_function_group (function_groups[i]);
@@ -4119,7 +4427,7 @@ builtin_decl (unsigned int code, bool)
   return (*registered_functions)[code]->decl;
 }
 
-/* Attempt to fold STMT, given that it's a call to the SVE function
+/* Attempt to fold STMT, given that it's a call to the RVV function
    with subcode CODE.  Return the new statement on success and null
    on failure.  Insert any other new statements at GSI.  */
 gimple *
@@ -4139,7 +4447,7 @@ expand_builtin (unsigned int code, tree exp, rtx target)
   return function_expander (rfn.instance, rfn.decl, exp, target).expand ();
 }
 
-/* Perform any semantic checks needed for a call to the SVE function
+/* Perform any semantic checks needed for a call to the RVV function
    with subcode CODE, such as testing for integer constant expressions.
    The call occurs at location LOCATION and has NARGS arguments,
    given by ARGS.  FNDECL is the original function decl, before
@@ -4153,6 +4461,24 @@ check_builtin_call (location_t location, vec<location_t>, unsigned int code,
   const registered_function &rfn = *(*registered_functions)[code];
   return function_checker (location, rfn.instance, fndecl,
 			   TREE_TYPE (rfn.decl), nargs, args).check ();
+}
+
+tree
+resolve_overloaded_builtin (unsigned int code, vec<tree, va_gc> *arglist)
+{
+  if (code >= vec_safe_length (registered_functions))
+    return NULL_TREE;
+
+  registered_function *rfun = (*registered_functions)[code];
+
+  if (!rfun || !rfun->overloaded_p)
+    return NULL_TREE;
+
+  hashval_t hash = rfun->overloaded_hash (*arglist);
+  registered_function *rfn
+    = non_overloaded_function_table->find_with_hash (rfun, hash);
+  gcc_assert (rfn);
+  return rfn->decl;
 }
 
 function_instance

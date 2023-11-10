@@ -947,7 +947,7 @@ validate_subreg (machine_mode omode, machine_mode imode,
      in post-reload splitters that make arbitrarily mode changes to the
      registers themselves.  */
   else if (VECTOR_MODE_P (omode)
-	   && GET_MODE_INNER (omode) == GET_MODE_INNER (imode))
+	   && GET_MODE_UNIT_SIZE (omode) == GET_MODE_UNIT_SIZE (imode))
     ;
   /* Subregs involving floating point modes are not allowed to
      change size unless it's an insert into a complex mode.
@@ -5166,6 +5166,30 @@ emit_jump_insn (rtx x)
     }
 
   return last;
+}
+
+/* Make an insn of code JUMP_INSN with pattern X,
+   add a REG_BR_PROB note that indicates very likely probability,
+   and add it to the end of the doubly-linked list.  */
+
+rtx_insn *
+emit_likely_jump_insn (rtx x)
+{
+  rtx_insn *jump = emit_jump_insn (x);
+  add_reg_br_prob_note (jump, profile_probability::very_likely ());
+  return jump;
+}
+
+/* Make an insn of code JUMP_INSN with pattern X,
+   add a REG_BR_PROB note that indicates very unlikely probability,
+   and add it to the end of the doubly-linked list.  */
+
+rtx_insn *
+emit_unlikely_jump_insn (rtx x)
+{
+  rtx_insn *jump = emit_jump_insn (x);
+  add_reg_br_prob_note (jump, profile_probability::very_unlikely ());
+  return jump;
 }
 
 /* Make an insn of code CALL_INSN with pattern X
