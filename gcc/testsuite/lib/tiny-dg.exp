@@ -1,0 +1,113 @@
+#   Copyright (C) 2009-2023 Free Software Foundation, Inc.
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with GCC; see the file COPYING3.  If not see
+# <http://www.gnu.org/licenses/>.
+
+
+#
+# DejaGnu Setup for the Tiny language
+#   For details to the Dejagnu directives and more 
+#   see: https://gcc.gnu.org/onlinedocs/gccint/Directives.html
+#
+
+puts "+lib/tiny-dg.exp ..."
+#
+# Define go callbacks for dg.exp.
+# Loading /usr/share/dejagnu/dg.exp
+#
+load_lib dg.exp
+
+
+#
+# tiny-dg-test
+#    This is called from share/dejagnu/dg.exp
+# 
+proc tiny-dg-test { prog do_what extra_tool_flags } {
+puts "+lib/tiny-dg.exp: tiny-dg-test [file rootname [file tail $prog]]"
+
+    # Set up options, based on what we're going to do.
+	#    - Setting of the compiler type is handled in the dejagnu file /usr/share/dejagnu/target.exp
+	#      Use the c++ compiler as Tiny is integrated into the gcc compiler.
+	#    - Suppress advanced diagnostic messages from gcc: additional_flags=-fdiagnostics-plain-output
+    set options [list "c++" "additional_flags=-fdiagnostics-plain-output"]
+
+    set compile_type [compile-type $do_what]
+    set output_file  [compile-outfile $do_what $prog]
+
+    verbose "tiny_compile $prog $output_file $compile_type $options" 4
+    set comp_output [tiny_compile "$prog" "$output_file" "$compile_type" $options]
+
+    return [list $comp_output $output_file]
+}
+
+
+# 
+# compile-type 
+# -- based on gcc-dg.exp, proc gcc-dg-test-1
+#    translate dg-do directive to compile type: preprocess, assembly, object, executable
+#
+proc compile-type { do_what } {
+    switch $do_what {
+	"preprocess" {
+	    set compile_type "preprocess"
+	}
+	"compile" {
+	    set compile_type "assembly"
+	}
+	"assemble" {
+	    set compile_type "object"
+	}
+	"link" {
+	    set compile_type "executable"
+	}
+	"run" {
+	    set compile_type "executable"
+	}
+	default {
+	    perror "$do_what: not a valid dg-do keyword"
+		set compile_type ""
+	}
+    }
+	return $compile_type 
+}
+
+# 
+# compile-outfile 
+# -- based on gcc-dg.exp, proc gcc-dg-test-1
+#    translate dg-do directive to compile outfile type: .i, .s, .o, -exe
+#
+proc compile-outfile { do_what prog } {
+    switch $do_what {
+	"preprocess" {
+	    set output_file "[file rootname [file tail $prog]].i"
+	}
+	"compile" {
+	    set output_file "[file rootname [file tail $prog]].s"
+	}
+	"assemble" {
+	    set output_file "[file rootname [file tail $prog]].o"
+	}
+	"link" {
+	    set output_file "[file rootname [file tail $prog]]-exe"
+	}
+	"run" {
+	    set output_file "./[file rootname [file tail $prog]]-exe"
+	}
+	default {
+	    perror "$do_what: not a valid dg-do keyword"
+	    set output_file ""
+	}
+    }
+	return $output_file
+}
