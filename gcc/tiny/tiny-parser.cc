@@ -1564,7 +1564,6 @@ Parser::null_denotation (const_TokenPtr tok)
 	Tree expr = parse_expression (LBP_UNARY_PLUS);
 	if (expr.is_error ())
 	  return Tree::error ();
-
 	if ( expr.get_type () != integer_type_node
 	  && expr.get_type () != float_type_node)
 	  {

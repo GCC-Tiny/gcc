@@ -1,0 +1,4 @@
+# { dg-do compile }
+# { dg-error "unended string literal" "unended string literal" { target *-*-* } 4 }
+# { dg-error "expecting ‘;’ but ‘end of file’ found" "expecting ‘;’" { target *-*-* } 4 }
+write "... oops no closing of string on the very last line
