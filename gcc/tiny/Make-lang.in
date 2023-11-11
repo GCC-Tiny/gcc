@@ -81,3 +81,11 @@ tiny.stagefeedback: stagefeedback-start
 	-mv tiny/*$(objext) stagefeedback/tiny
 
 selftest-tiny:
+
+# List of targets that can use the generic check- rule and its // variant.
+# Invoke with make check-tiny
+lang_checks += check-tiny
+### -- ignore parallel variant for now
+###lang_checks_parallelized += check-tiny
+### For description see the check_$lang_parallelize comment in gcc/Makefile.in.
+###check_tiny_parallelize = 10000
