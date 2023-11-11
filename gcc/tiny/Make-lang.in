@@ -81,7 +81,6 @@ tiny.stagefeedback: stagefeedback-start
 	-mv tiny/*$(objext) stagefeedback/tiny
 
 selftest-tiny:
-
 # List of targets that can use the generic check- rule and its // variant.
 # Invoke with make check-tiny
 lang_checks += check-tiny
