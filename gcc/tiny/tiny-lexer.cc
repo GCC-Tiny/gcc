@@ -215,7 +215,7 @@ Lexer::build_token ()
 	case '#': /* comment */
 	  current_column++;
 	  current_char = peek_input ();
-	  while (current_char != '\n')
+	  while (current_char != '\n' && current_char != EOF)
 	    {
 	      skip_input ();
 	      current_column++; // won't be used
@@ -318,7 +318,7 @@ Lexer::build_token ()
 
 	  int length = 1;
 	  current_char = peek_input ();
-	  while (current_char != '\n' && current_char != '"')
+	  while (current_char != '\n' && current_char != '"' && current_char != EOF)
 	    {
 	      length++;
 
@@ -329,7 +329,7 @@ Lexer::build_token ()
 
 	  current_column += length;
 
-	  if (current_char == '\n')
+	  if (current_char == '\n' || current_char == EOF)
 	    {
 	      error_at (get_current_location (), "unended string literal");
 	    }
