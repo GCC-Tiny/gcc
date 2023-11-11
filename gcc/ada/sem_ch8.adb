@@ -26,7 +26,6 @@
 with Atree;          use Atree;
 with Debug;          use Debug;
 with Einfo;          use Einfo;
-with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Elists;         use Elists;
 with Errout;         use Errout;
@@ -39,6 +38,7 @@ with Impunit;        use Impunit;
 with Lib;            use Lib;
 with Lib.Load;       use Lib.Load;
 with Lib.Xref;       use Lib.Xref;
+with Local_Restrict;
 with Namet;          use Namet;
 with Namet.Sp;       use Namet.Sp;
 with Nlists;         use Nlists;
@@ -605,9 +605,7 @@ package body Sem_Ch8 is
       --  declaration, but not language-defined ones. The call to procedure
       --  Analyze_Aspect_Specifications will take care of this error check.
 
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, Id);
-      end if;
+      Analyze_Aspect_Specifications (N, Id);
    end Analyze_Exception_Renaming;
 
    ---------------------------
@@ -753,9 +751,7 @@ package body Sem_Ch8 is
       --  declaration, but not language-defined ones. The call to procedure
       --  Analyze_Aspect_Specifications will take care of this error check.
 
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, New_P);
-      end if;
+      Analyze_Aspect_Specifications (N, New_P);
    end Analyze_Generic_Renaming;
 
    -----------------------------
@@ -1147,7 +1143,7 @@ package body Sem_Ch8 is
          --  there is no copy involved and no performance hit.
 
          if Nkind (Nam) = N_Function_Call
-           and then Is_Limited_View (Etype (Nam))
+           and then Is_Inherently_Limited_Type (Etype (Nam))
            and then not Is_Constrained (Etype (Nam))
            and then Comes_From_Source (N)
          then
@@ -1582,9 +1578,7 @@ package body Sem_Ch8 is
       --  declaration, but not language-defined ones. The call to procedure
       --  Analyze_Aspect_Specifications will take care of this error check.
 
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, Id);
-      end if;
+      Analyze_Aspect_Specifications (N, Id);
 
       --  Deal with dimensions
 
@@ -1765,9 +1759,7 @@ package body Sem_Ch8 is
       --  declaration, but not language-defined ones. The call to procedure
       --  Analyze_Aspect_Specifications will take care of this error check.
 
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, New_P);
-      end if;
+      Analyze_Aspect_Specifications (N, New_P);
    end Analyze_Package_Renaming;
 
    -------------------------------
@@ -4205,9 +4197,7 @@ package body Sem_Ch8 is
       --  declaration, but not language-defined ones. The call to procedure
       --  Analyze_Aspect_Specifications will take care of this error check.
 
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, New_S);
-      end if;
+      Analyze_Aspect_Specifications (N, New_S);
 
       --  AI12-0279
 
@@ -4246,6 +4236,11 @@ package body Sem_Ch8 is
          if Present (Alias (New_S)) then
             Mark_Use_Clauses (Alias (New_S));
          end if;
+      end if;
+
+      if Is_Actual then
+         Local_Restrict.Check_Actual_Subprogram_For_Instance
+           (Actual_Subp_Name => Nam, Formal_Subp => Formal_Spec);
       end if;
    end Analyze_Subprogram_Renaming;
 
@@ -9301,7 +9296,7 @@ package body Sem_Ch8 is
 
    procedure Pop_Scope is
       SST : Scope_Stack_Entry renames Scope_Stack.Table (Scope_Stack.Last);
-      S   : constant Entity_Id := SST.Entity;
+      S   : constant Scope_Kind_Id := SST.Entity;
 
    begin
       if Debug_Flag_E then
@@ -9363,7 +9358,7 @@ package body Sem_Ch8 is
    -- Push_Scope --
    ----------------
 
-   procedure Push_Scope (S : Entity_Id) is
+   procedure Push_Scope (S : Scope_Kind_Id) is
       E : constant Entity_Id := Scope (S);
 
       function Component_Alignment_Default return Component_Alignment_Kind;

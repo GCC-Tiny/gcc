@@ -58,6 +58,12 @@ enum lst_type
   LST_INDEXED,
 };
 
+enum frm_op_type
+{
+  NO_FRM,
+  HAS_FRM,
+};
+
 /* Helper function to fold vleff and vlsegff.  */
 static gimple *
 fold_fault_load (gimple_folder &f)
@@ -125,19 +131,31 @@ public:
 
     tree type = builtin_types[e.type.index].vector;
     machine_mode mode = TYPE_MODE (type);
-    machine_mode inner_mode = GET_MODE_INNER (mode);
+    /* Normalize same RATO (SEW/LMUL) into same vsetvl instruction.
+
+	 - e8,mf8/e16,mf4/e32,mf2/e64,m1 --> e8mf8
+	 - e8,mf4/e16,mf2/e32,m1/e64,m2  --> e8mf4
+	 - e8,mf2/e16,m1/e32,m2/e64,m4   --> e8mf2
+	 - e8,m1/e16,m2/e32,m4/e64,m8    --> e8m1
+	 - e8,m2/e16,m4/e32,m8           --> e8m2
+	 - e8,m4/e16,m8                  --> e8m4
+	 - e8,m8                         --> e8m8
+    */
     /* SEW.  */
-    e.add_input_operand (Pmode,
-			 gen_int_mode (GET_MODE_BITSIZE (inner_mode), Pmode));
+    e.add_input_operand (Pmode, gen_int_mode (8, Pmode));
 
     /* LMUL.  */
-    e.add_input_operand (Pmode, gen_int_mode (get_vlmul (mode), Pmode));
+    machine_mode e8_mode
+      = get_vector_mode (QImode, GET_MODE_NUNITS (mode)).require ();
+    e.add_input_operand (Pmode, gen_int_mode (get_vlmul (e8_mode), Pmode));
 
-    /* TA.  */
-    e.add_input_operand (Pmode, gen_int_mode (1, Pmode));
+    /* TAIL_ANY.  */
+    e.add_input_operand (Pmode,
+			 gen_int_mode (get_prefer_tail_policy (), Pmode));
 
-    /* MU.  */
-    e.add_input_operand (Pmode, gen_int_mode (0, Pmode));
+    /* MASK_ANY.  */
+    e.add_input_operand (Pmode,
+			 gen_int_mode (get_prefer_mask_policy (), Pmode));
     return e.generate_insn (code_for_vsetvl_no_side_effects (Pmode));
   }
 };
@@ -256,100 +274,28 @@ public:
    vremu/vsadd/vsaddu/vssub/vssubu
    vfadd/vfsub/
 */
-template<rtx_code CODE>
+template <rtx_code CODE, bool MAY_REQUIRE_FRM = false,
+	  enum frm_op_type FRM_OP = NO_FRM>
 class binop : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return MAY_REQUIRE_FRM; }
+
   rtx expand (function_expander &e) const override
   {
     switch (e.op_info->op)
       {
       case OP_TYPE_vx:
+	gcc_assert (FRM_OP == NO_FRM);
       case OP_TYPE_vf:
 	return e.use_exact_insn (code_for_pred_scalar (CODE, e.vector_mode ()));
       case OP_TYPE_vv:
 	return e.use_exact_insn (code_for_pred (CODE, e.vector_mode ()));
-      default:
-	gcc_unreachable ();
-      }
-  }
-};
-
-/* Implements below instructions for now.
-   - vfadd
-   - vfsub
-   - vfmul
-   - vfdiv
-*/
-template<rtx_code CODE>
-class binop_frm : public function_base
-{
-public:
-  bool has_rounding_mode_operand_p () const override { return true; }
-
-  rtx expand (function_expander &e) const override
-  {
-    switch (e.op_info->op)
-      {
-      case OP_TYPE_vf:
-	return e.use_exact_insn (code_for_pred_scalar (CODE, e.vector_mode ()));
-      case OP_TYPE_vv:
-	return e.use_exact_insn (code_for_pred (CODE, e.vector_mode ()));
-      default:
-	gcc_unreachable ();
-      }
-  }
-};
-
-/* Implements below instructions for frm
-   - vfrsub
-   - vfrdiv
-*/
-template<rtx_code CODE>
-class reverse_binop_frm : public function_base
-{
-public:
-  bool has_rounding_mode_operand_p () const override { return true; }
-
-public:
-  rtx expand (function_expander &e) const override
-  {
-    return e.use_exact_insn (
-      code_for_pred_reverse_scalar (CODE, e.vector_mode ()));
-  }
-};
-
-/* Implements below instructions for frm
-   - vfwadd
-   - vfwsub
-   - vfwmul
-*/
-template<rtx_code CODE>
-class widen_binop_frm : public function_base
-{
-public:
-  bool has_rounding_mode_operand_p () const override { return true; }
-
-  rtx expand (function_expander &e) const override
-  {
-    switch (e.op_info->op)
-      {
-      case OP_TYPE_vv:
-	return e.use_exact_insn (
-	  code_for_pred_dual_widen (CODE, e.vector_mode ()));
-      case OP_TYPE_vf:
-	return e.use_exact_insn (
-	  code_for_pred_dual_widen_scalar (CODE, e.vector_mode ()));
-      case OP_TYPE_wv:
-	if (CODE == PLUS)
-	  return e.use_exact_insn (
-	    code_for_pred_single_widen_add (e.vector_mode ()));
-	else
-	  return e.use_exact_insn (
-	    code_for_pred_single_widen_sub (e.vector_mode ()));
-      case OP_TYPE_wf:
-	return e.use_exact_insn (
-	  code_for_pred_single_widen_scalar (CODE, e.vector_mode ()));
       default:
 	gcc_unreachable ();
       }
@@ -368,10 +314,17 @@ public:
 };
 
 /* Implements vneg/vnot.  */
-template<rtx_code CODE>
+template<rtx_code CODE, enum frm_op_type FRM_OP = NO_FRM>
 class unop : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     return e.use_exact_insn (code_for_pred (CODE, e.vector_mode ()));
@@ -420,7 +373,7 @@ public:
   }
 };
 
-/* Implements vwadd/vwsub/vwmul/vfwadd/vfwsub/vfwmul.  */
+/* Implements vwadd/vwsub/vwmul.  */
 template<rtx_code CODE1, rtx_code CODE2 = FLOAT_EXTEND>
 class widen_binop : public function_base
 {
@@ -450,10 +403,19 @@ public:
       }
   }
 };
-template<rtx_code CODE>
-class widen_binop<CODE, FLOAT_EXTEND> : public function_base
+
+/* Implement vfwadd/vfwsub/vfwmul.  */
+template<rtx_code CODE, enum frm_op_type FRM_OP = NO_FRM>
+class widen_binop_fp : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     switch (e.op_info->op)
@@ -687,6 +649,8 @@ class sat_op : public function_base
 public:
   bool has_rounding_mode_operand_p () const override { return true; }
 
+  bool may_require_vxrm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     switch (e.op_info->op)
@@ -708,6 +672,8 @@ class vnclip : public function_base
 {
 public:
   bool has_rounding_mode_operand_p () const override { return true; }
+
+  bool may_require_vxrm_p () const override { return true; }
 
   rtx expand (function_expander &e) const override
   {
@@ -1072,10 +1038,17 @@ public:
 };
 
 /* Implements vfrsub/vfrdiv.  */
-template<rtx_code CODE>
+template<rtx_code CODE, enum frm_op_type FRM_OP = NO_FRM>
 class reverse_binop : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     return e.use_exact_insn (
@@ -1083,9 +1056,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfmacc : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1101,9 +1082,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfnmsac : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1118,9 +1107,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfmadd : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1136,9 +1133,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfnmsub : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1153,9 +1158,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfnmacc : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1170,9 +1183,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfmsac : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1188,9 +1209,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfnmadd : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1205,9 +1234,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfmsub : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1223,9 +1260,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfwmacc : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1240,9 +1285,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfwnmacc : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1257,9 +1310,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfwmsac : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1274,9 +1335,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfwnmsac : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   bool has_merge_operand_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
@@ -1292,10 +1361,17 @@ public:
 };
 
 /* Implements vfsqrt7/vfrec7/vfclass/vfsgnj/vfsgnjx.  */
-template<int UNSPEC>
+template<int UNSPEC, enum frm_op_type FRM_OP = NO_FRM>
 class float_misc : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     if (e.op_info->op == OP_TYPE_vf)
@@ -1358,10 +1434,17 @@ public:
 };
 
 /* Implements vfcvt.x.  */
-template<int UNSPEC>
+template<int UNSPEC, enum frm_op_type FRM_OP = NO_FRM>
 class vfcvt_x : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     return e.use_exact_insn (code_for_pred_fcvt_x_f (UNSPEC, e.arg_mode (0)));
@@ -1379,9 +1462,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfcvt_f : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     if (e.op_info->op == OP_TYPE_x_v)
@@ -1394,10 +1485,17 @@ public:
 };
 
 /* Implements vfwcvt.x.  */
-template<int UNSPEC>
+template<int UNSPEC, enum frm_op_type FRM_OP = NO_FRM>
 class vfwcvt_x : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     return e.use_exact_insn (
@@ -1433,10 +1531,17 @@ public:
 };
 
 /* Implements vfncvt.x.  */
-template<int UNSPEC>
+template<int UNSPEC, enum frm_op_type FRM_OP = NO_FRM>
 class vfncvt_x : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     return e.use_exact_insn (
@@ -1455,9 +1560,17 @@ public:
   }
 };
 
+template<enum frm_op_type FRM_OP = NO_FRM>
 class vfncvt_f : public function_base
 {
 public:
+  bool has_rounding_mode_operand_p () const override
+  {
+    return FRM_OP == HAS_FRM;
+  }
+
+  bool may_require_frm_p () const override { return true; }
+
   rtx expand (function_expander &e) const override
   {
     if (e.op_info->op == OP_TYPE_f_w)
@@ -1481,7 +1594,7 @@ public:
 };
 
 /* Implements reduction instructions.  */
-template<rtx_code CODE>
+template<unsigned UNSPEC>
 class reducop : public function_base
 {
 public:
@@ -1489,52 +1602,27 @@ public:
 
   rtx expand (function_expander &e) const override
   {
-    return e.use_exact_insn (
-      code_for_pred_reduc (CODE, e.vector_mode (), e.ret_mode ()));
-  }
-};
-
-/* Implements widen reduction instructions.  */
-template<int UNSPEC>
-class widen_reducop : public function_base
-{
-public:
-  bool apply_mask_policy_p () const override { return false; }
-
-  rtx expand (function_expander &e) const override
-  {
-    return e.use_exact_insn (code_for_pred_widen_reduc_plus (UNSPEC,
-							     e.vector_mode (),
-							     e.ret_mode ()));
+    return e.use_exact_insn (code_for_pred (UNSPEC, e.vector_mode ()));
   }
 };
 
 /* Implements floating-point reduction instructions.  */
-template<int UNSPEC>
+template<unsigned UNSPEC, enum frm_op_type FRM_OP = NO_FRM>
 class freducop : public function_base
 {
 public:
-  bool apply_mask_policy_p () const override { return false; }
-
-  rtx expand (function_expander &e) const override
+  bool has_rounding_mode_operand_p () const override
   {
-    return e.use_exact_insn (
-      code_for_pred_reduc_plus (UNSPEC, e.vector_mode (), e.ret_mode ()));
+    return FRM_OP == HAS_FRM;
   }
-};
 
-/* Implements widening floating-point reduction instructions.  */
-template<int UNSPEC>
-class widen_freducop : public function_base
-{
-public:
+  bool may_require_frm_p () const override { return true; }
+
   bool apply_mask_policy_p () const override { return false; }
 
   rtx expand (function_expander &e) const override
   {
-    return e.use_exact_insn (code_for_pred_widen_reduc_plus (UNSPEC,
-							     e.vector_mode (),
-							     e.ret_mode ()));
+    return e.use_exact_insn (code_for_pred (UNSPEC, e.vector_mode ()));
   }
 };
 
@@ -1715,6 +1803,8 @@ public:
 
   rtx expand (function_expander &e) const override
   {
+    if (!e.target)
+      return NULL_RTX;
     rtx dest = expand_normal (CALL_EXPR_ARG (e.exp, 0));
     gcc_assert (riscv_v_ext_vector_mode_p (GET_MODE (dest)));
     rtx index = expand_normal (CALL_EXPR_ARG (e.exp, 1));
@@ -1752,6 +1842,8 @@ public:
 
   rtx expand (function_expander &e) const override
   {
+    if (!e.target)
+      return NULL_RTX;
     rtx src = expand_normal (CALL_EXPR_ARG (e.exp, 0));
     gcc_assert (riscv_v_ext_vector_mode_p (GET_MODE (src)));
     rtx index = expand_normal (CALL_EXPR_ARG (e.exp, 1));
@@ -1759,6 +1851,61 @@ public:
     rtx subreg
       = simplify_gen_subreg (GET_MODE (e.target), src, GET_MODE (src), offset);
     return subreg;
+  }
+};
+
+class vcreate : public function_base
+{
+public:
+  gimple *fold (gimple_folder &f) const override
+  {
+    unsigned int nargs = gimple_call_num_args (f.call);
+    tree lhs_type = TREE_TYPE (f.lhs);
+    /* LMUL > 1 non-tuple vector types are not structure,
+   we can't use __val[index] to set the subpart.  */
+    if (!riscv_v_ext_tuple_mode_p (TYPE_MODE (lhs_type)))
+      return NULL;
+
+    /* Replace the call with a clobber of the result (to prevent it from
+       becoming upwards exposed) followed by stores into each individual
+       vector of tuple.
+
+       The fold routines expect the replacement statement to have the
+       same lhs as the original call, so return the clobber statement
+       rather than the final vector store.  */
+    gassign *clobber = gimple_build_assign (f.lhs, build_clobber (lhs_type));
+
+    for (unsigned int i = nargs; i-- > 0; )
+      {
+	tree rhs_vector = gimple_call_arg (f.call, i);
+	tree field = tuple_type_field (TREE_TYPE (f.lhs));
+	tree lhs_array = build3 (COMPONENT_REF, TREE_TYPE (field),
+				 unshare_expr (f.lhs), field, NULL_TREE);
+	tree lhs_vector = build4 (ARRAY_REF, TREE_TYPE (rhs_vector),
+				  lhs_array, size_int (i),
+				  NULL_TREE, NULL_TREE);
+	gassign *assign = gimple_build_assign (lhs_vector, rhs_vector);
+	gsi_insert_after (f.gsi, assign, GSI_SAME_STMT);
+      }
+    return clobber;
+  }
+
+  rtx expand (function_expander &e) const override
+  {
+    if (!e.target)
+      return NULL_RTX;
+    gcc_assert (riscv_v_ext_vector_mode_p (GET_MODE (e.target)));
+    unsigned int nargs = call_expr_nargs (e.exp);
+    for (unsigned int i = 0; i < nargs; i++)
+      {
+	rtx src = expand_normal (CALL_EXPR_ARG (e.exp, i));
+	poly_int64 offset = i * GET_MODE_SIZE (GET_MODE (src));
+	rtx subreg = simplify_gen_subreg (GET_MODE (src), e.target,
+					  GET_MODE (e.target), offset);
+	emit_move_insn (subreg, src);
+      }
+
+    return e.target;
   }
 };
 
@@ -2097,39 +2244,53 @@ static CONSTEXPR const mask_misc<UNSPEC_VMSIF> vmsif_obj;
 static CONSTEXPR const mask_misc<UNSPEC_VMSOF> vmsof_obj;
 static CONSTEXPR const viota viota_obj;
 static CONSTEXPR const vid vid_obj;
-static CONSTEXPR const binop<PLUS> vfadd_obj;
-static CONSTEXPR const binop<MINUS> vfsub_obj;
-static CONSTEXPR const binop_frm<PLUS> vfadd_frm_obj;
-static CONSTEXPR const binop_frm<MINUS> vfsub_frm_obj;
+static CONSTEXPR const binop<PLUS, true> vfadd_obj;
+static CONSTEXPR const binop<MINUS, true> vfsub_obj;
+static CONSTEXPR const binop<PLUS, true, HAS_FRM> vfadd_frm_obj;
+static CONSTEXPR const binop<MINUS, true, HAS_FRM> vfsub_frm_obj;
 static CONSTEXPR const reverse_binop<MINUS> vfrsub_obj;
-static CONSTEXPR const reverse_binop_frm<MINUS> vfrsub_frm_obj;
-static CONSTEXPR const widen_binop<PLUS> vfwadd_obj;
-static CONSTEXPR const widen_binop_frm<PLUS> vfwadd_frm_obj;
-static CONSTEXPR const widen_binop<MINUS> vfwsub_obj;
-static CONSTEXPR const widen_binop_frm<MINUS> vfwsub_frm_obj;
-static CONSTEXPR const binop<MULT> vfmul_obj;
-static CONSTEXPR const binop_frm<MULT> vfmul_frm_obj;
-static CONSTEXPR const binop<DIV> vfdiv_obj;
-static CONSTEXPR const binop_frm<DIV> vfdiv_frm_obj;
+static CONSTEXPR const reverse_binop<MINUS, HAS_FRM> vfrsub_frm_obj;
+static CONSTEXPR const widen_binop_fp<PLUS> vfwadd_obj;
+static CONSTEXPR const widen_binop_fp<PLUS, HAS_FRM> vfwadd_frm_obj;
+static CONSTEXPR const widen_binop_fp<MINUS> vfwsub_obj;
+static CONSTEXPR const widen_binop_fp<MINUS, HAS_FRM> vfwsub_frm_obj;
+static CONSTEXPR const binop<MULT, true> vfmul_obj;
+static CONSTEXPR const binop<MULT,  true, HAS_FRM> vfmul_frm_obj;
+static CONSTEXPR const binop<DIV, true> vfdiv_obj;
+static CONSTEXPR const binop<DIV,  true, HAS_FRM> vfdiv_frm_obj;
 static CONSTEXPR const reverse_binop<DIV> vfrdiv_obj;
-static CONSTEXPR const reverse_binop_frm<DIV> vfrdiv_frm_obj;
-static CONSTEXPR const widen_binop<MULT> vfwmul_obj;
-static CONSTEXPR const widen_binop_frm<MULT> vfwmul_frm_obj;
-static CONSTEXPR const vfmacc vfmacc_obj;
-static CONSTEXPR const vfnmsac vfnmsac_obj;
-static CONSTEXPR const vfmadd vfmadd_obj;
-static CONSTEXPR const vfnmsub vfnmsub_obj;
-static CONSTEXPR const vfnmacc vfnmacc_obj;
-static CONSTEXPR const vfmsac vfmsac_obj;
-static CONSTEXPR const vfnmadd vfnmadd_obj;
-static CONSTEXPR const vfmsub vfmsub_obj;
-static CONSTEXPR const vfwmacc vfwmacc_obj;
-static CONSTEXPR const vfwnmacc vfwnmacc_obj;
-static CONSTEXPR const vfwmsac vfwmsac_obj;
-static CONSTEXPR const vfwnmsac vfwnmsac_obj;
+static CONSTEXPR const reverse_binop<DIV, HAS_FRM> vfrdiv_frm_obj;
+static CONSTEXPR const widen_binop_fp<MULT> vfwmul_obj;
+static CONSTEXPR const widen_binop_fp<MULT, HAS_FRM> vfwmul_frm_obj;
+static CONSTEXPR const vfmacc<NO_FRM> vfmacc_obj;
+static CONSTEXPR const vfmacc<HAS_FRM> vfmacc_frm_obj;
+static CONSTEXPR const vfnmsac<NO_FRM> vfnmsac_obj;
+static CONSTEXPR const vfnmsac<HAS_FRM> vfnmsac_frm_obj;
+static CONSTEXPR const vfmadd<NO_FRM> vfmadd_obj;
+static CONSTEXPR const vfmadd<HAS_FRM> vfmadd_frm_obj;
+static CONSTEXPR const vfnmsub<NO_FRM> vfnmsub_obj;
+static CONSTEXPR const vfnmsub<HAS_FRM> vfnmsub_frm_obj;
+static CONSTEXPR const vfnmacc<NO_FRM> vfnmacc_obj;
+static CONSTEXPR const vfnmacc<HAS_FRM> vfnmacc_frm_obj;
+static CONSTEXPR const vfmsac<NO_FRM> vfmsac_obj;
+static CONSTEXPR const vfmsac<HAS_FRM> vfmsac_frm_obj;
+static CONSTEXPR const vfnmadd<NO_FRM> vfnmadd_obj;
+static CONSTEXPR const vfnmadd<HAS_FRM> vfnmadd_frm_obj;
+static CONSTEXPR const vfmsub<NO_FRM> vfmsub_obj;
+static CONSTEXPR const vfmsub<HAS_FRM> vfmsub_frm_obj;
+static CONSTEXPR const vfwmacc<NO_FRM> vfwmacc_obj;
+static CONSTEXPR const vfwmacc<HAS_FRM> vfwmacc_frm_obj;
+static CONSTEXPR const vfwnmacc<NO_FRM> vfwnmacc_obj;
+static CONSTEXPR const vfwnmacc<HAS_FRM> vfwnmacc_frm_obj;
+static CONSTEXPR const vfwmsac<NO_FRM> vfwmsac_obj;
+static CONSTEXPR const vfwmsac<HAS_FRM> vfwmsac_frm_obj;
+static CONSTEXPR const vfwnmsac<NO_FRM> vfwnmsac_obj;
+static CONSTEXPR const vfwnmsac<HAS_FRM> vfwnmsac_frm_obj;
 static CONSTEXPR const unop<SQRT> vfsqrt_obj;
+static CONSTEXPR const unop<SQRT, HAS_FRM> vfsqrt_frm_obj;
 static CONSTEXPR const float_misc<UNSPEC_VFRSQRT7> vfrsqrt7_obj;
 static CONSTEXPR const float_misc<UNSPEC_VFREC7> vfrec7_obj;
+static CONSTEXPR const float_misc<UNSPEC_VFREC7, HAS_FRM> vfrec7_frm_obj;
 static CONSTEXPR const binop<SMIN> vfmin_obj;
 static CONSTEXPR const binop<SMAX> vfmax_obj;
 static CONSTEXPR const float_misc<UNSPEC_VCOPYSIGN> vfsgnj_obj;
@@ -2147,37 +2308,49 @@ static CONSTEXPR const vfclass vfclass_obj;
 static CONSTEXPR const vmerge vfmerge_obj;
 static CONSTEXPR const vmv_v vfmv_v_obj;
 static CONSTEXPR const vfcvt_x<UNSPEC_VFCVT> vfcvt_x_obj;
+static CONSTEXPR const vfcvt_x<UNSPEC_VFCVT, HAS_FRM> vfcvt_x_frm_obj;
 static CONSTEXPR const vfcvt_x<UNSPEC_UNSIGNED_VFCVT> vfcvt_xu_obj;
+static CONSTEXPR const vfcvt_x<UNSPEC_UNSIGNED_VFCVT, HAS_FRM> vfcvt_xu_frm_obj;
 static CONSTEXPR const vfcvt_rtz_x<FIX> vfcvt_rtz_x_obj;
 static CONSTEXPR const vfcvt_rtz_x<UNSIGNED_FIX> vfcvt_rtz_xu_obj;
-static CONSTEXPR const vfcvt_f vfcvt_f_obj;
+static CONSTEXPR const vfcvt_f<NO_FRM> vfcvt_f_obj;
+static CONSTEXPR const vfcvt_f<HAS_FRM> vfcvt_f_frm_obj;
 static CONSTEXPR const vfwcvt_x<UNSPEC_VFCVT> vfwcvt_x_obj;
+static CONSTEXPR const vfwcvt_x<UNSPEC_VFCVT, HAS_FRM> vfwcvt_x_frm_obj;
 static CONSTEXPR const vfwcvt_x<UNSPEC_UNSIGNED_VFCVT> vfwcvt_xu_obj;
+static CONSTEXPR const vfwcvt_x<UNSPEC_UNSIGNED_VFCVT, HAS_FRM> vfwcvt_xu_frm_obj;
 static CONSTEXPR const vfwcvt_rtz_x<FIX> vfwcvt_rtz_x_obj;
 static CONSTEXPR const vfwcvt_rtz_x<UNSIGNED_FIX> vfwcvt_rtz_xu_obj;
 static CONSTEXPR const vfwcvt_f vfwcvt_f_obj;
 static CONSTEXPR const vfncvt_x<UNSPEC_VFCVT> vfncvt_x_obj;
+static CONSTEXPR const vfncvt_x<UNSPEC_VFCVT, HAS_FRM> vfncvt_x_frm_obj;
 static CONSTEXPR const vfncvt_x<UNSPEC_UNSIGNED_VFCVT> vfncvt_xu_obj;
+static CONSTEXPR const vfncvt_x<UNSPEC_UNSIGNED_VFCVT, HAS_FRM> vfncvt_xu_frm_obj;
 static CONSTEXPR const vfncvt_rtz_x<FIX> vfncvt_rtz_x_obj;
 static CONSTEXPR const vfncvt_rtz_x<UNSIGNED_FIX> vfncvt_rtz_xu_obj;
-static CONSTEXPR const vfncvt_f vfncvt_f_obj;
+static CONSTEXPR const vfncvt_f<NO_FRM> vfncvt_f_obj;
+static CONSTEXPR const vfncvt_f<HAS_FRM> vfncvt_f_frm_obj;
 static CONSTEXPR const vfncvt_rod_f vfncvt_rod_f_obj;
-static CONSTEXPR const reducop<PLUS> vredsum_obj;
-static CONSTEXPR const reducop<UMAX> vredmaxu_obj;
-static CONSTEXPR const reducop<SMAX> vredmax_obj;
-static CONSTEXPR const reducop<UMIN> vredminu_obj;
-static CONSTEXPR const reducop<SMIN> vredmin_obj;
-static CONSTEXPR const reducop<AND> vredand_obj;
-static CONSTEXPR const reducop<IOR> vredor_obj;
-static CONSTEXPR const reducop<XOR> vredxor_obj;
-static CONSTEXPR const widen_reducop<UNSPEC_WREDUC_SUM> vwredsum_obj;
-static CONSTEXPR const widen_reducop<UNSPEC_WREDUC_USUM> vwredsumu_obj;
-static CONSTEXPR const freducop<UNSPEC_UNORDERED> vfredusum_obj;
-static CONSTEXPR const freducop<UNSPEC_ORDERED> vfredosum_obj;
-static CONSTEXPR const reducop<SMAX> vfredmax_obj;
-static CONSTEXPR const reducop<SMIN> vfredmin_obj;
-static CONSTEXPR const widen_freducop<UNSPEC_UNORDERED> vfwredusum_obj;
-static CONSTEXPR const widen_freducop<UNSPEC_ORDERED> vfwredosum_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_SUM> vredsum_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_MAXU> vredmaxu_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_MAX> vredmax_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_MINU> vredminu_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_MIN> vredmin_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_AND> vredand_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_OR> vredor_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_XOR> vredxor_obj;
+static CONSTEXPR const reducop<UNSPEC_WREDUC_SUM> vwredsum_obj;
+static CONSTEXPR const reducop<UNSPEC_WREDUC_SUMU> vwredsumu_obj;
+static CONSTEXPR const freducop<UNSPEC_REDUC_SUM_UNORDERED> vfredusum_obj;
+static CONSTEXPR const freducop<UNSPEC_REDUC_SUM_UNORDERED, HAS_FRM> vfredusum_frm_obj;
+static CONSTEXPR const freducop<UNSPEC_REDUC_SUM_ORDERED> vfredosum_obj;
+static CONSTEXPR const freducop<UNSPEC_REDUC_SUM_ORDERED, HAS_FRM> vfredosum_frm_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_MAX> vfredmax_obj;
+static CONSTEXPR const reducop<UNSPEC_REDUC_MIN> vfredmin_obj;
+static CONSTEXPR const freducop<UNSPEC_WREDUC_SUM_UNORDERED> vfwredusum_obj;
+static CONSTEXPR const freducop<UNSPEC_WREDUC_SUM_UNORDERED, HAS_FRM> vfwredusum_frm_obj;
+static CONSTEXPR const freducop<UNSPEC_WREDUC_SUM_ORDERED> vfwredosum_obj;
+static CONSTEXPR const freducop<UNSPEC_WREDUC_SUM_ORDERED, HAS_FRM> vfwredosum_frm_obj;
 static CONSTEXPR const vmv vmv_x_obj;
 static CONSTEXPR const vmv_s vmv_s_obj;
 static CONSTEXPR const vmv vfmv_f_obj;
@@ -2197,6 +2370,7 @@ static CONSTEXPR const vlmul_ext vlmul_ext_obj;
 static CONSTEXPR const vlmul_trunc vlmul_trunc_obj;
 static CONSTEXPR const vset vset_obj;
 static CONSTEXPR const vget vget_obj;
+static CONSTEXPR const vcreate vcreate_obj;
 static CONSTEXPR const read_vl read_vl_obj;
 static CONSTEXPR const vleff vleff_obj;
 static CONSTEXPR const vlenb vlenb_obj;
@@ -2351,20 +2525,34 @@ BASE (vfrdiv_frm)
 BASE (vfwmul)
 BASE (vfwmul_frm)
 BASE (vfmacc)
+BASE (vfmacc_frm)
 BASE (vfnmsac)
+BASE (vfnmsac_frm)
 BASE (vfmadd)
+BASE (vfmadd_frm)
 BASE (vfnmsub)
+BASE (vfnmsub_frm)
 BASE (vfnmacc)
+BASE (vfnmacc_frm)
 BASE (vfmsac)
+BASE (vfmsac_frm)
 BASE (vfnmadd)
+BASE (vfnmadd_frm)
 BASE (vfmsub)
+BASE (vfmsub_frm)
 BASE (vfwmacc)
+BASE (vfwmacc_frm)
 BASE (vfwnmacc)
+BASE (vfwnmacc_frm)
 BASE (vfwmsac)
+BASE (vfwmsac_frm)
 BASE (vfwnmsac)
+BASE (vfwnmsac_frm)
 BASE (vfsqrt)
+BASE (vfsqrt_frm)
 BASE (vfrsqrt7)
 BASE (vfrec7)
+BASE (vfrec7_frm)
 BASE (vfmin)
 BASE (vfmax)
 BASE (vfsgnj)
@@ -2382,20 +2570,28 @@ BASE (vfclass)
 BASE (vfmerge)
 BASE (vfmv_v)
 BASE (vfcvt_x)
+BASE (vfcvt_x_frm)
 BASE (vfcvt_xu)
+BASE (vfcvt_xu_frm)
 BASE (vfcvt_rtz_x)
 BASE (vfcvt_rtz_xu)
 BASE (vfcvt_f)
+BASE (vfcvt_f_frm)
 BASE (vfwcvt_x)
+BASE (vfwcvt_x_frm)
 BASE (vfwcvt_xu)
+BASE (vfwcvt_xu_frm)
 BASE (vfwcvt_rtz_x)
 BASE (vfwcvt_rtz_xu)
 BASE (vfwcvt_f)
 BASE (vfncvt_x)
+BASE (vfncvt_x_frm)
 BASE (vfncvt_xu)
+BASE (vfncvt_xu_frm)
 BASE (vfncvt_rtz_x)
 BASE (vfncvt_rtz_xu)
 BASE (vfncvt_f)
+BASE (vfncvt_f_frm)
 BASE (vfncvt_rod_f)
 BASE (vredsum)
 BASE (vredmaxu)
@@ -2408,11 +2604,15 @@ BASE (vredxor)
 BASE (vwredsum)
 BASE (vwredsumu)
 BASE (vfredusum)
+BASE (vfredusum_frm)
 BASE (vfredosum)
+BASE (vfredosum_frm)
 BASE (vfredmax)
 BASE (vfredmin)
 BASE (vfwredosum)
+BASE (vfwredosum_frm)
 BASE (vfwredusum)
+BASE (vfwredusum_frm)
 BASE (vmv_x)
 BASE (vmv_s)
 BASE (vfmv_f)
@@ -2432,6 +2632,7 @@ BASE (vlmul_ext)
 BASE (vlmul_trunc)
 BASE (vset)
 BASE (vget)
+BASE (vcreate)
 BASE (read_vl)
 BASE (vleff)
 BASE (vlenb)

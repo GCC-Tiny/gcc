@@ -645,6 +645,7 @@ ISLLIBS
 GMPINC
 GMPLIBS
 target_cpu_default
+rust_target_objs
 d_target_objs
 fortran_target_objs
 cxx_target_objs
@@ -653,6 +654,8 @@ use_gcc_stdint
 xm_defines
 xm_include_list
 xm_file_list
+tm_rust_include_list
+tm_rust_file_list
 tm_d_include_list
 tm_d_file_list
 tm_p_include_list
@@ -741,6 +744,8 @@ ORIGINAL_PLUGIN_LD_FOR_TARGET
 gcc_cv_ld
 ORIGINAL_AS_FOR_TARGET
 gcc_cv_as
+ENABLE_DARWIN_AT_RPATH_FALSE
+ENABLE_DARWIN_AT_RPATH_TRUE
 enable_fast_install
 objdir
 OTOOL64
@@ -839,6 +844,7 @@ enable_gcov
 enable_shared
 enable_fixed_point
 enable_decimal_float
+DEFAULT_INSNEMIT_PARTITIONS
 DEFAULT_MATCHPD_PARTITIONS
 with_float
 with_cpu
@@ -968,6 +974,7 @@ enable_multilib
 enable_multiarch
 with_stack_clash_protection_guard_size
 with_matchpd_partitions
+with_insnemit_partitions
 enable___cxa_atexit
 enable_decimal_float
 enable_fixed_point
@@ -1006,6 +1013,8 @@ enable_static
 with_pic
 enable_fast_install
 enable_libtool_lock
+enable_darwin_at_rpath
+with_darwin_extra_rpath
 enable_ld
 enable_gold
 with_plugin_ld
@@ -1741,6 +1750,9 @@ Optional Features:
   --enable-fast-install[=PKGS]
                           optimize for fast installation [default=yes]
   --disable-libtool-lock  avoid locking (might break parallel builds)
+  --enable-darwin-at-rpath
+                          install libraries with @rpath/library-name, requires
+                          rpaths to be added to executables
   --enable-ld[=ARG]       build ld [ARG={default,yes,no}]
   --enable-gold[=ARG]     build gold [ARG={default,yes,no}]
   --enable-gnu-indirect-function
@@ -1836,6 +1848,9 @@ Optional Packages:
   --with-matchpd-partitions=num
                           Set the number of partitions to make for gimple and
                           generic when splitting match.pd. [default=10]
+  --with-insnemit-partitions=num
+                          Set the number of partitions of insn-emit.cc for
+                          genemit to create. [default=10]
   --with-dwarf2           force the default debug format to be DWARF 2 (or
                           later)
   --with-specs=SPECS      add SPECS to driver command-line processing
@@ -1864,6 +1879,9 @@ Optional Packages:
   --with-pic              try to use only PIC/non-PIC objects [default=use
                           both]
   --with-gnu-ld           assume the C compiler uses GNU ld [default=no]
+  --with-darwin-extra-rpath=[ARG]
+                          Specify a runpath directory, additional to those
+                          provided by the compiler
   --with-plugin-ld=[ARG]  specify the plugin linker
   --with-glibc-version=M.N
                           assume GCC used with glibc version M.N or later
@@ -3765,31 +3783,54 @@ gcc_gxx_libcxx_include_dir=
 if test "${with_gxx_libcxx_include_dir+set}" = set; then :
   withval=$with_gxx_libcxx_include_dir; case "${withval}" in
 yes)	as_fn_error $? "bad value ${withval} given for libc++ include directory" "$LINENO" 5 ;;
-no)	;;
 *)	gcc_gxx_libcxx_include_dir=$with_gxx_libcxx_include_dir ;;
 esac
 fi
 
 
+# --with-gxx-libcxx-include-dir controls the enabling of the -stdlib option.
+# if --with-gxx-libcxx-include-dir is 'no' we disable the stdlib option.
+# if --with-gxx-libcxx-include-dir is unset we enable the stdlib option
+# based on the platform (to be available on platform versions where it is the
+# default for the system tools). We also use a default path within the compiler
+# install tree.
+# Otherwise, we use the path provided and enable the stdlib option.
 # If both --with-sysroot and --with-gxx-libcxx-include-dir are passed, we
 # check to see if the latter starts with the former and, upon success, compute
 # gcc_gxx_libcxx_include_dir as relative to the sysroot.
 gcc_gxx_libcxx_include_dir_add_sysroot=0
-
+gcc_enable_stdlib_opt=0
 if test x${gcc_gxx_libcxx_include_dir} != x; then
-
-$as_echo "#define ENABLE_STDLIB_OPTION 1" >>confdefs.h
-
-else
-  $as_echo "#define ENABLE_STDLIB_OPTION 0" >>confdefs.h
-
-fi
-# ??? This logic must match libstdc++-v3/acinclude.m4:GLIBCXX_EXPORT_INSTALL_INFO.
-if test x${gcc_gxx_libcxx_include_dir} = x; then
-  if test x${enable_version_specific_runtime_libs} = xyes; then
-    gcc_gxx_libcxx_include_dir='${libsubdir}/libc++_include/c++/v1'
+  if test x${gcc_gxx_libcxx_include_dir} = xno; then
+    # set defaults for the dir, but the option is disabled anyway.
+    gcc_gxx_libcxx_include_dir=
   else
-    libcxx_incdir='libc++_include/c++/$(version)/v1'
+    gcc_enable_stdlib_opt=1
+  fi
+else
+  case $target in
+    *-darwin1[1-9]* | *-darwin2*)
+       # Default this on for Darwin versions which default to libcxx,
+       # and embed the path in the compiler install so that we get a
+       # self-contained toolchain.
+       gcc_enable_stdlib_opt=1
+       ;;
+    *) ;;
+  esac
+fi
+
+cat >>confdefs.h <<_ACEOF
+#define ENABLE_STDLIB_OPTION $gcc_enable_stdlib_opt
+_ACEOF
+
+
+# Sysroot behaviour as for gxx-include-dir
+if test x${gcc_gxx_libcxx_include_dir} = x; then
+  # default path,embedded in the compiler tree.
+  libcxx_incdir='include/c++/v1'
+  if test x${enable_version_specific_runtime_libs} = xyes; then
+    gcc_gxx_libcxx_include_dir='${libsubdir}/$libcxx_incdir'
+  else
     if test x$host != x$target; then
        libcxx_incdir="$target_alias/$libcxx_incdir"
     fi
@@ -5480,9 +5521,7 @@ case "${target}" in
     sh-*-linux* | sh[2346lbe]*-*-linux*)
 	PICFLAG_FOR_TARGET=-fpic
 	;;
-    # FIXME: Simplify to sh*-*-netbsd*?
-    sh-*-netbsdelf* | shl*-*-netbsdelf* | sh5-*-netbsd* | sh5l*-*-netbsd* | \
-      sh64-*-netbsd* | sh64l*-*-netbsd*)
+    sh*-*-netbsd*)
 	PICFLAG_FOR_TARGET=-fpic
 	;;
     # Default to -fPIC unless specified otherwise.
@@ -7910,6 +7949,21 @@ fi
 
 if (test $DEFAULT_MATCHPD_PARTITIONS -lt 1); then
   as_fn_error $? "Invalid value $DEFAULT_MATCHPD_PARTITIONS for --with-matchpd-partitions. Cannot be negative." "$LINENO" 5
+fi
+
+
+
+# Specify the number of splits of insn-emit.cc to generate.
+
+# Check whether --with-insnemit-partitions was given.
+if test "${with_insnemit_partitions+set}" = set; then :
+  withval=$with_insnemit_partitions; DEFAULT_INSNEMIT_PARTITIONS="$with_insnemit_partitions"
+else
+  DEFAULT_INSNEMIT_PARTITIONS=10
+fi
+
+if (test $DEFAULT_INSNEMIT_PARTITIONS -lt 1); then
+  as_fn_error $? "Invalid value $DEFAULT_INSNEMIT_PARTITIONS for --with-insnemit-partitions. Cannot be negative." "$LINENO" 5
 fi
 
 
@@ -11299,7 +11353,7 @@ else
       # Check to see if the program is GNU ld.  I'd rather use --version,
       # but apparently some GNU ld's only accept -v.
       # Break only if it was the GNU/non-GNU ld that we prefer.
-      if "$acl_cv_path_LD" -v 2>&1 < /dev/null | egrep '(GNU|with BFD)' > /dev/null; then
+      if "$acl_cv_path_LD" -v 2>&1 < /dev/null | $EGREP '(GNU|with BFD)' > /dev/null; then
 	test "$with_gnu_ld" != no && break
       else
 	test "$with_gnu_ld" != yes && break
@@ -11327,7 +11381,7 @@ if ${acl_cv_prog_gnu_ld+:} false; then :
   $as_echo_n "(cached) " >&6
 else
   # I'd rather use --version here, but apparently some GNU ld's only accept -v.
-if $LD -v 2>&1 </dev/null | egrep '(GNU|with BFD)' 1>&5; then
+if $LD -v 2>&1 </dev/null | $EGREP '(GNU|with BFD)' 1>&5; then
   acl_cv_prog_gnu_ld=yes
 else
   acl_cv_prog_gnu_ld=no
@@ -13564,6 +13618,17 @@ for f in $tm_d_file; do
   esac
 done
 
+tm_rust_file_list=
+tm_rust_include_list=
+for f in $tm_rust_file; do
+  case $f in
+    * )
+       tm_rust_file_list="${tm_rust_file_list} \$(srcdir)/config/$f"
+       tm_rust_include_list="${tm_rust_include_list} config/$f"
+       ;;
+  esac
+done
+
 xm_file_list=
 xm_include_list=
 for f in $xm_file; do
@@ -14136,48 +14201,55 @@ if ${lt_cv_path_NM+:} false; then :
   $as_echo_n "(cached) " >&6
 else
   if test -n "$NM"; then
-  # Let the user override the test.
-  lt_cv_path_NM="$NM"
-else
-  lt_nm_to_check="${ac_tool_prefix}nm"
-  if test -n "$ac_tool_prefix" && test "$build" = "$host"; then
-    lt_nm_to_check="$lt_nm_to_check nm"
-  fi
-  for lt_tmp_nm in $lt_nm_to_check; do
-    lt_save_ifs="$IFS"; IFS=$PATH_SEPARATOR
-    for ac_dir in $PATH /usr/ccs/bin/elf /usr/ccs/bin /usr/ucb /bin; do
-      IFS="$lt_save_ifs"
-      test -z "$ac_dir" && ac_dir=.
-      tmp_nm="$ac_dir/$lt_tmp_nm"
-      if test -f "$tmp_nm" || test -f "$tmp_nm$ac_exeext" ; then
-	# Check to see if the nm accepts a BSD-compat flag.
-	# Adding the `sed 1q' prevents false positives on HP-UX, which says:
-	#   nm: unknown option "B" ignored
-	# Tru64's nm complains that /dev/null is an invalid object file
-	case `"$tmp_nm" -B /dev/null 2>&1 | sed '1q'` in
-	*/dev/null* | *'Invalid file or object type'*)
-	  lt_cv_path_NM="$tmp_nm -B"
-	  break
-	  ;;
-	*)
-	  case `"$tmp_nm" -p /dev/null 2>&1 | sed '1q'` in
-	  */dev/null*)
-	    lt_cv_path_NM="$tmp_nm -p"
-	    break
-	    ;;
-	  *)
-	    lt_cv_path_NM=${lt_cv_path_NM="$tmp_nm"} # keep the first match, but
-	    continue # so that we can try to find one that supports BSD flags
-	    ;;
-	  esac
-	  ;;
-	esac
-      fi
-    done
-    IFS="$lt_save_ifs"
-  done
-  : ${lt_cv_path_NM=no}
-fi
+   # Let the user override the nm to test.
+   lt_nm_to_check="$NM"
+ else
+   lt_nm_to_check="${ac_tool_prefix}nm"
+   if test -n "$ac_tool_prefix" && test "$build" = "$host"; then
+     lt_nm_to_check="$lt_nm_to_check nm"
+   fi
+ fi
+ for lt_tmp_nm in "$lt_nm_to_check"; do
+   lt_save_ifs="$IFS"; IFS=$PATH_SEPARATOR
+   for ac_dir in $PATH /usr/ccs/bin/elf /usr/ccs/bin /usr/ucb /bin; do
+     IFS="$lt_save_ifs"
+     test -z "$ac_dir" && ac_dir=.
+     # Strip out any user-provided options from the nm to test twice,
+     # the first time to test to see if nm (rather than its options) has
+     # an explicit path, the second time to yield a file which can be
+     # nm'ed itself.
+     tmp_nm_path="`$ECHO "$lt_tmp_nm" | sed 's, -.*$,,'`"
+     case "$tmp_nm_path" in
+     */*|*\\*) tmp_nm="$lt_tmp_nm";;
+     *) tmp_nm="$ac_dir/$lt_tmp_nm";;
+     esac
+     tmp_nm_to_nm="`$ECHO "$tmp_nm" | sed 's, -.*$,,'`"
+     if test -f "$tmp_nm_to_nm" || test -f "$tmp_nm_to_nm$ac_exeext" ; then
+       # Check to see if the nm accepts a BSD-compat flag.
+       # Adding the `sed 1q' prevents false positives on HP-UX, which says:
+       #   nm: unknown option "B" ignored
+       case `"$tmp_nm" -B "$tmp_nm_to_nm" 2>&1 | grep -v '^ *$' | sed '1q'` in
+       *$tmp_nm*) lt_cv_path_NM="$tmp_nm -B"
+	 break
+	 ;;
+       *)
+	 case `"$tmp_nm" -p "$tmp_nm_to_nm" 2>&1 | grep -v '^ *$' | sed '1q'` in
+	 *$tmp_nm*)
+	   lt_cv_path_NM="$tmp_nm -p"
+	   break
+	   ;;
+	 *)
+	   lt_cv_path_NM=${lt_cv_path_NM="$tmp_nm"} # keep the first match, but
+	   continue # so that we can try to find one that supports BSD flags
+	   ;;
+	 esac
+	 ;;
+       esac
+     fi
+   done
+   IFS="$lt_save_ifs"
+ done
+ : ${lt_cv_path_NM=no}
 fi
 { $as_echo "$as_me:${as_lineno-$LINENO}: result: $lt_cv_path_NM" >&5
 $as_echo "$lt_cv_path_NM" >&6; }
@@ -14899,6 +14971,19 @@ test -z "$deplibs_check_method" && deplibs_check_method=unknown
 
 
 
+plugin_option=
+plugin_names="liblto_plugin.so liblto_plugin-0.dll cyglto_plugin-0.dll"
+for plugin in $plugin_names; do
+  plugin_so=`${CC} ${CFLAGS} --print-prog-name $plugin`
+  if test x$plugin_so = x$plugin; then
+    plugin_so=`${CC} ${CFLAGS} --print-file-name $plugin`
+  fi
+  if test x$plugin_so != x$plugin; then
+    plugin_option="--plugin $plugin_so"
+    break
+  fi
+done
+
 if test -n "$ac_tool_prefix"; then
   # Extract the first word of "${ac_tool_prefix}ar", so it can be a program name with args.
 set dummy ${ac_tool_prefix}ar; ac_word=$2
@@ -14992,6 +15077,19 @@ else
 fi
 
 test -z "$AR" && AR=ar
+if test -n "$plugin_option"; then
+  if $AR --help 2>&1 | grep -q "\--plugin"; then
+    touch conftest.c
+    $AR $plugin_option rc conftest.a conftest.c
+    if test "$?" != 0; then
+      { $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: Failed: $AR $plugin_option rc" >&5
+$as_echo "$as_me: WARNING: Failed: $AR $plugin_option rc" >&2;}
+    else
+      AR="$AR $plugin_option"
+    fi
+    rm -f conftest.*
+  fi
+fi
 test -z "$AR_FLAGS" && AR_FLAGS=cru
 
 
@@ -15196,6 +15294,11 @@ else
 fi
 
 test -z "$RANLIB" && RANLIB=:
+if test -n "$plugin_option" && test "$RANLIB" != ":"; then
+  if $RANLIB --help 2>&1 | grep -q "\--plugin"; then
+    RANLIB="$RANLIB $plugin_option"
+  fi
+fi
 
 
 
@@ -15310,7 +15413,7 @@ osf*)
   symcode='[BCDEGQRST]'
   ;;
 solaris*)
-  symcode='[BDRT]'
+  symcode='[BCDRT]'
   ;;
 sco3.2v5*)
   symcode='[DT]'
@@ -16320,7 +16423,7 @@ $as_echo "$lt_cv_ld_force_load" >&6; }
       # darwin 5.x (macOS 10.1) onwards we only need to adjust when the
       # deployment target is forced to an earlier version.
       case ${MACOSX_DEPLOYMENT_TARGET-UNSET},$host in
-	UNSET,*-darwin[89]*|UNSET,*-darwin[12][0123456789]*)
+	UNSET,*-darwin[89]*|UNSET,*-darwin[12][0-9]*)
 	  ;;
 	10.[012][,.]*)
 	  _lt_dar_allow_undefined='${wl}-flat_namespace ${wl}-undefined ${wl}suppress'
@@ -18025,6 +18128,49 @@ if test -z "$aix_libpath"; then aix_libpath="/usr/lib:/lib"; fi
     darwin* | rhapsody*)
 
 
+
+  # Publish an arg to allow the user to select that Darwin host (and target)
+  # libraries should be given install-names like @rpath/libfoo.dylib.  This
+  # requires that the user of the library then adds an 'rpath' to the DSO that
+  # needs access.
+  # NOTE: there are defaults below, for systems that support rpaths.  The person
+  # configuring can override the defaults for any system version that supports
+  # them - they are, however, forced off for system versions without support.
+  # Check whether --enable-darwin-at-rpath was given.
+if test "${enable_darwin_at_rpath+set}" = set; then :
+  enableval=$enable_darwin_at_rpath; if test "x$enable_darwin_at_rpath" = "xyes"; then
+    # This is not supported before macOS 10.5 / Darwin9.
+    case ${MACOSX_DEPLOYMENT_TARGET-UNSET},$host_os in
+      UNSET,darwin[4-8]*|UNSET,rhapsody*|10.[0-4][,.]*)
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: Darwin @rpath library names are incompatible with OSX versions earlier than 10.5 (rpaths disabled)" >&5
+$as_echo "$as_me: WARNING: Darwin @rpath library names are incompatible with OSX versions earlier than 10.5 (rpaths disabled)" >&2;}
+	enable_darwin_at_rpath=no
+      ;;
+    esac
+   fi
+else
+  case ${MACOSX_DEPLOYMENT_TARGET-UNSET},$host_os in
+    # As above, before 10.5 / Darwin9 this does not work.
+     UNSET,darwin[4-8]*|UNSET,rhapsody*|10.[0-4][,.]*)
+       enable_darwin_at_rpath=no
+       ;;
+
+    # We cannot build and test reliably on macOS 10.11+ (Darwin15+) without use
+    # of rpaths, since runpaths set via DYLD_LIBRARY_PATH are elided by key
+    # system executables (e.g. /bin/sh).  Force rpaths on for these systems.
+      UNSET,darwin1[5-9]*|UNSET,darwin2*|10.1[1-9][,.]*|1[1-9].*[,.]* )
+      { $as_echo "$as_me:${as_lineno-$LINENO}: @rpath library names are needed on macOS versions later than 10.11 (rpaths have been enabled)" >&5
+$as_echo "$as_me: @rpath library names are needed on macOS versions later than 10.11 (rpaths have been enabled)" >&6;}
+      enable_darwin_at_rpath=yes
+      ;;
+    # NOTE: we are not (yet) doing anything for 10.5 .. 10.10, since they can
+    # work with either DYLD_LIBRARY_PATH or embedded rpaths.
+
+    esac
+
+fi
+
+
   archive_cmds_need_lc=no
   hardcode_direct=no
   hardcode_automatic=yes
@@ -18042,9 +18188,13 @@ if test -z "$aix_libpath"; then aix_libpath="/usr/lib:/lib"; fi
   esac
   if test "$_lt_dar_can_shared" = "yes"; then
     output_verbose_link_cmd=func_echo_all
-    archive_cmds="\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name \$rpath/\$soname \$verstring $_lt_dar_single_mod${_lt_dsymutil}"
+    _lt_install_name='\$rpath/\$soname'
+    if test "x$enable_darwin_at_rpath" = "xyes"; then
+      _lt_install_name='@rpath/\$soname'
+    fi
+    archive_cmds="\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name ${_lt_install_name} \$verstring ${_lt_dsymutil}"
     module_cmds="\$CC \$allow_undefined_flag -o \$lib -bundle \$libobjs \$deplibs \$compiler_flags${_lt_dsymutil}"
-    archive_expsym_cmds="sed 's,^,_,' < \$export_symbols > \$output_objdir/\${libname}-symbols.expsym~\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name \$rpath/\$soname \$verstring ${_lt_dar_single_mod}${_lt_dar_export_syms}${_lt_dsymutil}"
+    archive_expsym_cmds="sed 's,^,_,' < \$export_symbols > \$output_objdir/\${libname}-symbols.expsym~\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name ${_lt_install_name} \$verstring ${_lt_dar_export_syms}${_lt_dsymutil}"
     module_expsym_cmds="sed -e 's,^,_,' < \$export_symbols > \$output_objdir/\${libname}-symbols.expsym~\$CC \$allow_undefined_flag -o \$lib -bundle \$libobjs \$deplibs \$compiler_flags${_lt_dar_export_syms}${_lt_dsymutil}"
 
   else
@@ -19030,7 +19180,7 @@ haiku*)
   soname_spec='${libname}${release}${shared_ext}$major'
   shlibpath_var=LIBRARY_PATH
   shlibpath_overrides_runpath=yes
-  sys_lib_dlsearch_path_spec='/boot/home/config/lib /boot/common/lib /boot/beos/system/lib'
+  sys_lib_dlsearch_path_spec='/boot/home/config/lib /boot/common/lib /boot/system/lib'
   hardcode_into_libs=yes
   ;;
 
@@ -19850,7 +20000,7 @@ else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
   lt_status=$lt_dlunknown
   cat > conftest.$ac_ext <<_LT_EOF
-#line 19853 "configure"
+#line 20003 "configure"
 #include "confdefs.h"
 
 #if HAVE_DLFCN_H
@@ -19956,7 +20106,7 @@ else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
   lt_status=$lt_dlunknown
   cat > conftest.$ac_ext <<_LT_EOF
-#line 19959 "configure"
+#line 20109 "configure"
 #include "confdefs.h"
 
 #if HAVE_DLFCN_H
@@ -20832,6 +20982,49 @@ if test -z "$aix_libpath"; then aix_libpath="/usr/lib:/lib"; fi
       darwin* | rhapsody*)
 
 
+
+  # Publish an arg to allow the user to select that Darwin host (and target)
+  # libraries should be given install-names like @rpath/libfoo.dylib.  This
+  # requires that the user of the library then adds an 'rpath' to the DSO that
+  # needs access.
+  # NOTE: there are defaults below, for systems that support rpaths.  The person
+  # configuring can override the defaults for any system version that supports
+  # them - they are, however, forced off for system versions without support.
+  # Check whether --enable-darwin-at-rpath was given.
+if test "${enable_darwin_at_rpath+set}" = set; then :
+  enableval=$enable_darwin_at_rpath; if test "x$enable_darwin_at_rpath" = "xyes"; then
+    # This is not supported before macOS 10.5 / Darwin9.
+    case ${MACOSX_DEPLOYMENT_TARGET-UNSET},$host_os in
+      UNSET,darwin[4-8]*|UNSET,rhapsody*|10.[0-4][,.]*)
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: Darwin @rpath library names are incompatible with OSX versions earlier than 10.5 (rpaths disabled)" >&5
+$as_echo "$as_me: WARNING: Darwin @rpath library names are incompatible with OSX versions earlier than 10.5 (rpaths disabled)" >&2;}
+	enable_darwin_at_rpath=no
+      ;;
+    esac
+   fi
+else
+  case ${MACOSX_DEPLOYMENT_TARGET-UNSET},$host_os in
+    # As above, before 10.5 / Darwin9 this does not work.
+     UNSET,darwin[4-8]*|UNSET,rhapsody*|10.[0-4][,.]*)
+       enable_darwin_at_rpath=no
+       ;;
+
+    # We cannot build and test reliably on macOS 10.11+ (Darwin15+) without use
+    # of rpaths, since runpaths set via DYLD_LIBRARY_PATH are elided by key
+    # system executables (e.g. /bin/sh).  Force rpaths on for these systems.
+      UNSET,darwin1[5-9]*|UNSET,darwin2*|10.1[1-9][,.]*|1[1-9].*[,.]* )
+      { $as_echo "$as_me:${as_lineno-$LINENO}: @rpath library names are needed on macOS versions later than 10.11 (rpaths have been enabled)" >&5
+$as_echo "$as_me: @rpath library names are needed on macOS versions later than 10.11 (rpaths have been enabled)" >&6;}
+      enable_darwin_at_rpath=yes
+      ;;
+    # NOTE: we are not (yet) doing anything for 10.5 .. 10.10, since they can
+    # work with either DYLD_LIBRARY_PATH or embedded rpaths.
+
+    esac
+
+fi
+
+
   archive_cmds_need_lc_CXX=no
   hardcode_direct_CXX=no
   hardcode_automatic_CXX=yes
@@ -20849,12 +21042,20 @@ if test -z "$aix_libpath"; then aix_libpath="/usr/lib:/lib"; fi
   esac
   if test "$_lt_dar_can_shared" = "yes"; then
     output_verbose_link_cmd=func_echo_all
-    archive_cmds_CXX="\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name \$rpath/\$soname \$verstring $_lt_dar_single_mod${_lt_dsymutil}"
+    _lt_install_name='\$rpath/\$soname'
+    if test "x$enable_darwin_at_rpath" = "xyes"; then
+      _lt_install_name='@rpath/\$soname'
+    fi
+    archive_cmds_CXX="\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name ${_lt_install_name} \$verstring ${_lt_dsymutil}"
     module_cmds_CXX="\$CC \$allow_undefined_flag -o \$lib -bundle \$libobjs \$deplibs \$compiler_flags${_lt_dsymutil}"
-    archive_expsym_cmds_CXX="sed 's,^,_,' < \$export_symbols > \$output_objdir/\${libname}-symbols.expsym~\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name \$rpath/\$soname \$verstring ${_lt_dar_single_mod}${_lt_dar_export_syms}${_lt_dsymutil}"
+    archive_expsym_cmds_CXX="sed 's,^,_,' < \$export_symbols > \$output_objdir/\${libname}-symbols.expsym~\$CC -dynamiclib \$allow_undefined_flag -o \$lib \$libobjs \$deplibs \$compiler_flags -install_name ${_lt_install_name} \$verstring ${_lt_dar_export_syms}${_lt_dsymutil}"
     module_expsym_cmds_CXX="sed -e 's,^,_,' < \$export_symbols > \$output_objdir/\${libname}-symbols.expsym~\$CC \$allow_undefined_flag -o \$lib -bundle \$libobjs \$deplibs \$compiler_flags${_lt_dar_export_syms}${_lt_dsymutil}"
        if test "$lt_cv_apple_cc_single_mod" != "yes"; then
-      archive_cmds_CXX="\$CC -r -keep_private_externs -nostdlib -o \${lib}-master.o \$libobjs~\$CC -dynamiclib \$allow_undefined_flag -o \$lib \${lib}-master.o \$deplibs \$compiler_flags -install_name \$rpath/\$soname \$verstring${_lt_dsymutil}"
+      _lt_install_name='\$rpath/\$soname'
+      if test "x$enable_darwin_at_rpath" = "xyes"; then
+        _lt_install_name='@rpath/\$soname'
+      fi
+      archive_cmds_CXX="\$CC -r -keep_private_externs -nostdlib -o \${lib}-master.o \$libobjs~\$CC -dynamiclib \$allow_undefined_flag -o \$lib \${lib}-master.o \$deplibs \$compiler_flags -install_name ${_lt_install_name} \$verstring${_lt_dsymutil}"
       archive_expsym_cmds_CXX="sed 's,^,_,' < \$export_symbols > \$output_objdir/\${libname}-symbols.expsym~\$CC -r -keep_private_externs -nostdlib -o \${lib}-master.o \$libobjs~\$CC -dynamiclib \$allow_undefined_flag -o \$lib \${lib}-master.o \$deplibs \$compiler_flags -install_name \$rpath/\$soname \$verstring${_lt_dar_export_syms}${_lt_dsymutil}"
     fi
 
@@ -22705,7 +22906,7 @@ haiku*)
   soname_spec='${libname}${release}${shared_ext}$major'
   shlibpath_var=LIBRARY_PATH
   shlibpath_overrides_runpath=yes
-  sys_lib_dlsearch_path_spec='/boot/home/config/lib /boot/common/lib /boot/beos/system/lib'
+  sys_lib_dlsearch_path_spec='/boot/home/config/lib /boot/common/lib /boot/system/lib'
   hardcode_into_libs=yes
   ;;
 
@@ -23223,6 +23424,35 @@ ac_compiler_gnu=$ac_cv_cxx_compiler_gnu
 
 
 
+
+
+ if test x$enable_darwin_at_rpath = xyes; then
+  ENABLE_DARWIN_AT_RPATH_TRUE=
+  ENABLE_DARWIN_AT_RPATH_FALSE='#'
+else
+  ENABLE_DARWIN_AT_RPATH_TRUE='#'
+  ENABLE_DARWIN_AT_RPATH_FALSE=
+fi
+
+DARWIN_DO_EXTRA_RPATH=0
+
+# Check whether --with-darwin-extra-rpath was given.
+if test "${with_darwin_extra_rpath+set}" = set; then :
+  withval=$with_darwin_extra_rpath; if test x"$withval" != x; then
+   DARWIN_ADD_RPATH="$withval"
+   DARWIN_DO_EXTRA_RPATH=1
+ fi
+fi
+
+
+cat >>confdefs.h <<_ACEOF
+#define DARWIN_DO_EXTRA_RPATH $DARWIN_DO_EXTRA_RPATH
+_ACEOF
+
+
+cat >>confdefs.h <<_ACEOF
+#define DARWIN_ADD_RPATH "$DARWIN_ADD_RPATH"
+_ACEOF
 
 
 # Identify the assembler which will work hand-in-glove with the newly
@@ -24640,6 +24870,46 @@ _ACEOF
 
 
 
+# Some assemblers (GNU as for LoongArch) generates relocations for
+# leb128 symbol arithmetic for relaxation, we need to disable relaxation
+# probing leb128 support then.
+case $target in
+  loongarch*-*-*)
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking assembler for -mno-relax support" >&5
+$as_echo_n "checking assembler for -mno-relax support... " >&6; }
+if ${gcc_cv_as_mno_relax+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  gcc_cv_as_mno_relax=no
+  if test x$gcc_cv_as != x; then
+    $as_echo '.text' > conftest.s
+    if { ac_try='$gcc_cv_as $gcc_cv_as_flags -mno-relax -o conftest.o conftest.s >&5'
+  { { eval echo "\"\$as_me\":${as_lineno-$LINENO}: \"$ac_try\""; } >&5
+  (eval $ac_try) 2>&5
+  ac_status=$?
+  $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+  test $ac_status = 0; }; }
+    then
+	gcc_cv_as_mno_relax=yes
+    else
+      echo "configure: failed program was" >&5
+      cat conftest.s >&5
+    fi
+    rm -f conftest.o conftest.s
+  fi
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $gcc_cv_as_mno_relax" >&5
+$as_echo "$gcc_cv_as_mno_relax" >&6; }
+if test $gcc_cv_as_mno_relax = yes; then
+  check_leb128_asflags=-mno-relax
+fi
+
+    ;;
+  *)
+    check_leb128_asflags=
+    ;;
+esac
+
 # Check if we have .[us]leb128, and support symbol arithmetic with it.
 # Older versions of GAS and some non-GNU assemblers, have a bugs handling
 # these directives, even when they appear to accept them.
@@ -24658,7 +24928,7 @@ L1:
 L2:
 	.uleb128 0x8000000000000000
 ' > conftest.s
-    if { ac_try='$gcc_cv_as $gcc_cv_as_flags  -o conftest.o conftest.s >&5'
+    if { ac_try='$gcc_cv_as $gcc_cv_as_flags $check_leb128_asflags -o conftest.o conftest.s >&5'
   { { eval echo "\"\$as_me\":${as_lineno-$LINENO}: \"$ac_try\""; } >&5
   (eval $ac_try) 2>&5
   ac_status=$?
@@ -26248,6 +26518,39 @@ $as_echo "#define HAVE_AS_MMACOSX_VERSION_MIN_OPTION 1" >>confdefs.h
 
 fi
 
+    if test x$gcc_cv_as_mmacosx_version_min = "xyes"; then
+       { $as_echo "$as_me:${as_lineno-$LINENO}: checking assembler for .build_version" >&5
+$as_echo_n "checking assembler for .build_version... " >&6; }
+if ${gcc_cv_as_darwin_build_version+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  gcc_cv_as_darwin_build_version=no
+  if test x$gcc_cv_as != x; then
+    $as_echo ' .build_version macos, 10, 14 sdk_version 10, 14' > conftest.s
+    if { ac_try='$gcc_cv_as $gcc_cv_as_flags -mmacosx-version-min=10.14 -o conftest.o conftest.s >&5'
+  { { eval echo "\"\$as_me\":${as_lineno-$LINENO}: \"$ac_try\""; } >&5
+  (eval $ac_try) 2>&5
+  ac_status=$?
+  $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+  test $ac_status = 0; }; }
+    then
+	gcc_cv_as_darwin_build_version=yes
+    else
+      echo "configure: failed program was" >&5
+      cat conftest.s >&5
+    fi
+    rm -f conftest.o conftest.s
+  fi
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $gcc_cv_as_darwin_build_version" >&5
+$as_echo "$gcc_cv_as_darwin_build_version" >&6; }
+if test $gcc_cv_as_darwin_build_version = yes; then
+
+$as_echo "#define HAVE_AS_MACOS_BUILD_VERSION 1" >>confdefs.h
+
+fi
+
+    fi
     ;;
 esac
 
@@ -28109,6 +28412,49 @@ fi
 
 
     case $target in
+      *-*-aix*) conftest_s='	.machine "pwr10"
+	.csect .text[PR]
+	tend. 0';;
+      *-*-darwin*) conftest_s='	.text
+	tend. 0';;
+      *) conftest_s='	.machine power10
+	.text
+	tend. 0';;
+    esac
+
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking assembler for htm support on Power10" >&5
+$as_echo_n "checking assembler for htm support on Power10... " >&6; }
+if ${gcc_cv_as_power10_htm+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  gcc_cv_as_power10_htm=no
+  if test x$gcc_cv_as != x; then
+    $as_echo "$conftest_s" > conftest.s
+    if { ac_try='$gcc_cv_as $gcc_cv_as_flags  -o conftest.o conftest.s >&5'
+  { { eval echo "\"\$as_me\":${as_lineno-$LINENO}: \"$ac_try\""; } >&5
+  (eval $ac_try) 2>&5
+  ac_status=$?
+  $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+  test $ac_status = 0; }; }
+    then
+	gcc_cv_as_power10_htm=yes
+    else
+      echo "configure: failed program was" >&5
+      cat conftest.s >&5
+    fi
+    rm -f conftest.o conftest.s
+  fi
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $gcc_cv_as_power10_htm" >&5
+$as_echo "$gcc_cv_as_power10_htm" >&6; }
+if test $gcc_cv_as_power10_htm = yes; then
+
+$as_echo "#define HAVE_AS_POWER10_HTM 1" >>confdefs.h
+
+fi
+
+
+    case $target in
       *-*-aix*) conftest_s='	.csect .text[PR]
 LCF..0:
 	addis 11,30,_GLOBAL_OFFSET_TABLE_-LCF..0@ha';;
@@ -29036,6 +29382,37 @@ $as_echo "$gcc_cv_as_loongarch_eh_frame_pcrel_encoding_support" >&6; }
 if test $gcc_cv_as_loongarch_eh_frame_pcrel_encoding_support = yes; then
 
 $as_echo "#define HAVE_AS_EH_FRAME_PCREL_ENCODING_SUPPORT 1" >>confdefs.h
+
+fi
+
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking assembler for -mrelax option" >&5
+$as_echo_n "checking assembler for -mrelax option... " >&6; }
+if ${gcc_cv_as_loongarch_relax+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  gcc_cv_as_loongarch_relax=no
+  if test x$gcc_cv_as != x; then
+    $as_echo '.text' > conftest.s
+    if { ac_try='$gcc_cv_as $gcc_cv_as_flags -mrelax -o conftest.o conftest.s >&5'
+  { { eval echo "\"\$as_me\":${as_lineno-$LINENO}: \"$ac_try\""; } >&5
+  (eval $ac_try) 2>&5
+  ac_status=$?
+  $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+  test $ac_status = 0; }; }
+    then
+	gcc_cv_as_loongarch_relax=yes
+    else
+      echo "configure: failed program was" >&5
+      cat conftest.s >&5
+    fi
+    rm -f conftest.o conftest.s
+  fi
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $gcc_cv_as_loongarch_relax" >&5
+$as_echo "$gcc_cv_as_loongarch_relax" >&6; }
+if test $gcc_cv_as_loongarch_relax = yes; then
+
+$as_echo "#define HAVE_AS_MRELAX_OPTION 1" >>confdefs.h
 
 fi
 
@@ -30516,7 +30893,8 @@ $as_echo "$gcc_cv_ld64_major" >&6; }
     { $as_echo "$as_me:${as_lineno-$LINENO}: checking linker version" >&5
 $as_echo_n "checking linker version... " >&6; }
     if test x"${gcc_cv_ld64_version}" = x; then
-      gcc_cv_ld64_version=`$gcc_cv_ld -v 2>&1 | grep ld64 | sed s/.*ld64-// | awk '{print $1}'`
+      gcc_cv_ld64_version=`$gcc_cv_ld -v 2>&1 | $EGREP 'ld64|dyld' \
+      | sed -e 's/.*ld64-//' -e 's/.*dyld-//'| awk '{print $1}'`
     fi
     { $as_echo "$as_me:${as_lineno-$LINENO}: result: $gcc_cv_ld64_version" >&5
 $as_echo "$gcc_cv_ld64_version" >&6; }
@@ -30601,7 +30979,7 @@ $as_echo_n "checking dsymutil version \"$dsymutil_temp\"... " >&6; }
       dsymutil_kind=LLVM
       dsymutil_vers=`echo $dsymutil_temp | sed 's/.*LLVM\ version\ \([0-9\.]*\).*/\1/'`
     else
-      dsymutil_kind=UNKNOWN
+      dsymutil_kind=DET_UNKNOWN
       dsymutil_vers="0.0"
     fi
     dsymutil_major=`expr "$dsymutil_vers" : '\([0-9]*\)'`
@@ -31870,6 +32248,9 @@ fi
 
 
 
+
+
+
 # Echo link setup.
 if test x${build} = x${host} ; then
   if test x${host} = x${target} ; then
@@ -31939,7 +32320,7 @@ fi
        elif test x$host = x$target; then
 	 export_sym_check="$gcc_cv_objdump -T"
        else
-	 export_sym_check=
+	 export_sym_check="$ac_cv_prog_OBJDUMP -T"
        fi
      ;;
    esac
@@ -32814,6 +33195,10 @@ LTLIBOBJS=$ac_ltlibobjs
 
 
 
+if test -z "${ENABLE_DARWIN_AT_RPATH_TRUE}" && test -z "${ENABLE_DARWIN_AT_RPATH_FALSE}"; then
+  as_fn_error $? "conditional \"ENABLE_DARWIN_AT_RPATH\" was never defined.
+Usually this means the macro was only invoked conditionally." "$LINENO" 5
+fi
 
 : "${CONFIG_STATUS=./config.status}"
 ac_write_fail=0

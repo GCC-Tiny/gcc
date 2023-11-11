@@ -42,6 +42,7 @@ with Exp_Tss;        use Exp_Tss;
 with Ghost;          use Ghost;
 with Layout;         use Layout;
 with Lib;            use Lib;
+with Local_Restrict;
 with Namet;          use Namet;
 with Nlists;         use Nlists;
 with Nmake;          use Nmake;
@@ -797,7 +798,7 @@ package body Freeze is
          --  limited objects.
 
          if Present (Init)
-           and then not Is_Limited_View (Typ)
+           and then not Is_Inherently_Limited_Type (Typ)
          then
             --  Capture initialization value at point of declaration, and make
             --  explicit assignment legal, because object may be a constant.
@@ -7445,7 +7446,8 @@ package body Freeze is
                --  be an array type, or a nonlimited record type).
 
                if Has_Private_Declaration (E) then
-                  if (not Is_Record_Type (E) or else not Is_Limited_View (E))
+                  if (not Is_Record_Type (E)
+                       or else not Is_Inherently_Limited_Type (E))
                     and then not Is_Private_Type (E)
                   then
                      Error_Msg_Name_1 := Name_Simple_Storage_Pool_Type;
@@ -8022,6 +8024,20 @@ package body Freeze is
          end if;
 
          Adjust_Esize_For_Alignment (Typ);
+      end if;
+
+      --  Reject a very large size on a type with a non-standard representation
+      --  because Expand_Freeze_Enumeration_Type cannot deal with it.
+
+      if Has_Non_Standard_Rep (Typ)
+        and then Known_Esize (Typ)
+        and then Esize (Typ) > System_Max_Integer_Size
+      then
+         Error_Msg_N
+           ("enumeration type with representation clause too large", Typ);
+         Error_Msg_Uint_1 := UI_From_Int (System_Max_Integer_Size);
+         Error_Msg_N
+           ("\the size of such a type cannot exceed ^ bits", Typ);
       end if;
    end Freeze_Enumeration_Type;
 
@@ -10162,6 +10178,13 @@ package body Freeze is
       then
          Error_Msg_N
            ("pragma Inline_Always not allowed for dispatching subprograms", E);
+      end if;
+
+      if Is_Dispatching_Operation (E)
+        and then Present (Overridden_Operation (E))
+      then
+         Local_Restrict.Check_Overriding
+           (Overrider_Op => E, Overridden_Op => Overridden_Operation (E));
       end if;
 
       --  Because of the implicit representation of inherited predefined

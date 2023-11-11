@@ -1109,7 +1109,8 @@ struct processor_costs ppca2_cost = {
 static tree (*rs6000_veclib_handler) (combined_fn, tree, tree);
 
 
-static bool rs6000_debug_legitimate_address_p (machine_mode, rtx, bool);
+static bool rs6000_debug_legitimate_address_p (machine_mode, rtx, bool,
+					       code_helper = ERROR_MARK);
 static tree rs6000_handle_longcall_attribute (tree *, tree, tree, int, bool *);
 static tree rs6000_handle_altivec_attribute (tree *, tree, tree, int, bool *);
 static tree rs6000_handle_struct_attribute (tree *, tree, tree, int, bool *);
@@ -1903,7 +1904,7 @@ rs6000_hard_regno_mode_ok_uncached (int regno, machine_mode mode)
 	  if(GET_MODE_SIZE (mode) == UNITS_PER_FP_WORD)
 	    return 1;
 
-	  if (TARGET_P8_VECTOR && (mode == SImode))
+	  if (TARGET_POPCNTD && mode == SImode)
 	    return 1;
 
 	  if (TARGET_P9_VECTOR && (mode == QImode || mode == HImode))
@@ -9883,12 +9884,19 @@ use_toc_relative_ref (rtx sym, machine_mode mode)
    because adjacent memory cells are accessed by adding word-sized offsets
    during assembly output.  */
 static bool
-rs6000_legitimate_address_p (machine_mode mode, rtx x, bool reg_ok_strict)
+rs6000_legitimate_address_p (machine_mode mode, rtx x, bool reg_ok_strict,
+			     code_helper ch = ERROR_MARK)
 {
   bool reg_offset_p = reg_offset_addressing_ok_p (mode);
   bool quad_offset_p = mode_supports_dq_form (mode);
 
   if (TARGET_ELF && RS6000_SYMBOL_REF_TLS_P (x))
+    return 0;
+
+  /* lxvl and stxvl doesn't support any addressing modes with PLUS.  */
+  if (ch.is_internal_fn ()
+      && (ch == IFN_LEN_LOAD || ch == IFN_LEN_STORE)
+      && GET_CODE (x) == PLUS)
     return 0;
 
   /* Handle unaligned altivec lvx/stvx type addresses.  */
@@ -9986,10 +9994,10 @@ rs6000_legitimate_address_p (machine_mode mode, rtx x, bool reg_ok_strict)
 
 /* Debug version of rs6000_legitimate_address_p.  */
 static bool
-rs6000_debug_legitimate_address_p (machine_mode mode, rtx x,
-				   bool reg_ok_strict)
+rs6000_debug_legitimate_address_p (machine_mode mode, rtx x, bool reg_ok_strict,
+				   code_helper ch)
 {
-  bool ret = rs6000_legitimate_address_p (mode, x, reg_ok_strict);
+  bool ret = rs6000_legitimate_address_p (mode, x, reg_ok_strict, ch);
   fprintf (stderr,
 	   "\nrs6000_legitimate_address_p: return = %s, mode = %s, "
 	   "strict = %d, reload = %s, code = %s\n",
@@ -10291,6 +10299,199 @@ rs6000_emit_set_const (rtx dest, rtx source)
   return true;
 }
 
+/* Check if C can be rotated to a negative value which 'lis' instruction is
+   able to load: 1..1xx0..0.  If so, set *ROT to the number by which C is
+   rotated, and return true.  Return false otherwise.  */
+
+static bool
+can_be_rotated_to_negative_lis (HOST_WIDE_INT c, int *rot)
+{
+  /* case a. 1..1xxx0..01..1: up to 15 x's, at least 16 0's.  */
+  int leading_ones = clz_hwi (~c);
+  int tailing_ones = ctz_hwi (~c);
+  int middle_zeros = ctz_hwi (c >> tailing_ones);
+  if (middle_zeros >= 16 && leading_ones + tailing_ones >= 33)
+    {
+      *rot = HOST_BITS_PER_WIDE_INT - tailing_ones;
+      return true;
+    }
+
+  /* case b. xx0..01..1xx: some of 15 x's (and some of 16 0's) are
+     rotated over the highest bit.  */
+  int pos_one = clz_hwi ((c << 16) >> 16);
+  middle_zeros = ctz_hwi (c >> (HOST_BITS_PER_WIDE_INT - pos_one));
+  int middle_ones = clz_hwi (~(c << pos_one));
+  if (middle_zeros >= 16 && middle_ones >= 33)
+    {
+      *rot = pos_one;
+      return true;
+    }
+
+  return false;
+}
+
+/* Check if value C can be built by 2 instructions: one is 'li or lis',
+   another is rotldi.
+
+   If so, *SHIFT is set to the shift operand of rotldi(rldicl), and *MASK
+   is set to the mask operand of rotldi(rldicl), and return true.
+   Return false otherwise.  */
+
+static bool
+can_be_built_by_li_lis_and_rotldi (HOST_WIDE_INT c, int *shift,
+				   HOST_WIDE_INT *mask)
+{
+  /* If C or ~C contains at least 49 successive zeros, then C can be rotated
+     to/from a positive or negative value that 'li' is able to load.  */
+  int n;
+  if (can_be_rotated_to_lowbits (c, 15, &n)
+      || can_be_rotated_to_lowbits (~c, 15, &n)
+      || can_be_rotated_to_negative_lis (c, &n))
+    {
+      *mask = HOST_WIDE_INT_M1;
+      *shift = HOST_BITS_PER_WIDE_INT - n;
+      return true;
+    }
+
+  return false;
+}
+
+/* Check if value C can be built by 2 instructions: one is 'li or lis',
+   another is rldicl.
+
+   If so, *SHIFT is set to the shift operand of rldicl, and *MASK is set to
+   the mask operand of rldicl, and return true.
+   Return false otherwise.  */
+
+static bool
+can_be_built_by_li_lis_and_rldicl (HOST_WIDE_INT c, int *shift,
+				   HOST_WIDE_INT *mask)
+{
+  /* Leading zeros may be cleaned by rldicl with a mask.  Change leading zeros
+     to ones and then recheck it.  */
+  int lz = clz_hwi (c);
+
+  /* If lz == 0, the left shift is undefined.  */
+  if (!lz)
+    return false;
+
+  HOST_WIDE_INT unmask_c
+    = c | (HOST_WIDE_INT_M1U << (HOST_BITS_PER_WIDE_INT - lz));
+  int n;
+  if (can_be_rotated_to_lowbits (~unmask_c, 15, &n)
+      || can_be_rotated_to_negative_lis (unmask_c, &n))
+    {
+      *mask = HOST_WIDE_INT_M1U >> lz;
+      *shift = n == 0 ? 0 : HOST_BITS_PER_WIDE_INT - n;
+      return true;
+    }
+
+  return false;
+}
+
+/* Check if value C can be built by 2 instructions: one is 'li or lis',
+   another is rldicr.
+
+   If so, *SHIFT is set to the shift operand of rldicr, and *MASK is set to
+   the mask operand of rldicr, and return true.
+   Return false otherwise.  */
+
+static bool
+can_be_built_by_li_lis_and_rldicr (HOST_WIDE_INT c, int *shift,
+				   HOST_WIDE_INT *mask)
+{
+  /* Tailing zeros may be cleaned by rldicr with a mask.  Change tailing zeros
+     to ones and then recheck it.  */
+  int tz = ctz_hwi (c);
+
+  /* If tz == HOST_BITS_PER_WIDE_INT, the left shift is undefined.  */
+  if (tz >= HOST_BITS_PER_WIDE_INT)
+    return false;
+
+  HOST_WIDE_INT unmask_c = c | ((HOST_WIDE_INT_1U << tz) - 1);
+  int n;
+  if (can_be_rotated_to_lowbits (~unmask_c, 15, &n)
+      || can_be_rotated_to_negative_lis (unmask_c, &n))
+    {
+      *mask = HOST_WIDE_INT_M1U << tz;
+      *shift = HOST_BITS_PER_WIDE_INT - n;
+      return true;
+    }
+
+  return false;
+}
+
+/* Check if value C can be built by 2 instructions: one is 'li', another is
+   rldic.
+
+   If so, *SHIFT is set to the 'shift' operand of rldic; and *MASK is set
+   to the mask value about the 'mb' operand of rldic; and return true.
+   Return false otherwise.  */
+
+static bool
+can_be_built_by_li_and_rldic (HOST_WIDE_INT c, int *shift, HOST_WIDE_INT *mask)
+{
+  /* There are 49 successive ones in the negative value of 'li'.  */
+  int ones = 49;
+
+  /* 1..1xx1..1: negative value of li --> 0..01..1xx0..0:
+     right bits are shifted as 0's, and left 1's(and x's) are cleaned.  */
+  int tz = ctz_hwi (c);
+  int lz = clz_hwi (c);
+
+  /* If lz == HOST_BITS_PER_WIDE_INT, the left shift is undefined.  */
+  if (lz >= HOST_BITS_PER_WIDE_INT)
+    return false;
+
+  int middle_ones = clz_hwi (~(c << lz));
+  if (tz + lz + middle_ones >= ones
+      && (tz - lz) < HOST_BITS_PER_WIDE_INT
+      && tz < HOST_BITS_PER_WIDE_INT)
+    {
+      *mask = ((1LL << (HOST_BITS_PER_WIDE_INT - tz - lz)) - 1LL) << tz;
+      *shift = tz;
+      return true;
+    }
+
+  /* 1..1xx1..1 --> 1..1xx0..01..1: some 1's(following x's) are cleaned. */
+  int leading_ones = clz_hwi (~c);
+  int tailing_ones = ctz_hwi (~c);
+  int middle_zeros = ctz_hwi (c >> tailing_ones);
+  if (leading_ones + tailing_ones + middle_zeros >= ones
+      && middle_zeros < HOST_BITS_PER_WIDE_INT)
+    {
+      *mask = ~(((1ULL << middle_zeros) - 1ULL) << tailing_ones);
+      *shift = tailing_ones + middle_zeros;
+      return true;
+    }
+
+  /* xx1..1xx: --> xx0..01..1xx: some 1's(following x's) are cleaned. */
+  /* Get the position for the first bit of successive 1.
+     The 24th bit would be in successive 0 or 1.  */
+  HOST_WIDE_INT low_mask = (HOST_WIDE_INT_1U << 24) - HOST_WIDE_INT_1U;
+  int pos_first_1 = ((c & (low_mask + 1)) == 0)
+		      ? clz_hwi (c & low_mask)
+		      : HOST_BITS_PER_WIDE_INT - ctz_hwi (~(c | low_mask));
+
+  /* Make sure the left and right shifts are defined.  */
+  if (!IN_RANGE (pos_first_1, 1, HOST_BITS_PER_WIDE_INT-1))
+    return false;
+
+  middle_ones = clz_hwi (~c << pos_first_1);
+  middle_zeros = ctz_hwi (c >> (HOST_BITS_PER_WIDE_INT - pos_first_1));
+  if (pos_first_1 < HOST_BITS_PER_WIDE_INT
+      && middle_ones + middle_zeros < HOST_BITS_PER_WIDE_INT
+      && middle_ones + middle_zeros >= ones)
+    {
+      *mask = ~(((1ULL << middle_zeros) - 1LL)
+		<< (HOST_BITS_PER_WIDE_INT - pos_first_1));
+      *shift = HOST_BITS_PER_WIDE_INT - pos_first_1 + middle_zeros;
+      return true;
+    }
+
+  return false;
+}
+
 /* Subroutine of rs6000_emit_set_const, handling PowerPC64 DImode.
    Output insns to set DEST equal to the constant C as a series of
    lis, ori and shl instructions.  */
@@ -10299,15 +10500,14 @@ static void
 rs6000_emit_set_long_const (rtx dest, HOST_WIDE_INT c)
 {
   rtx temp;
+  int shift;
+  HOST_WIDE_INT mask;
   HOST_WIDE_INT ud1, ud2, ud3, ud4;
 
   ud1 = c & 0xffff;
-  c = c >> 16;
-  ud2 = c & 0xffff;
-  c = c >> 16;
-  ud3 = c & 0xffff;
-  c = c >> 16;
-  ud4 = c & 0xffff;
+  ud2 = (c >> 16) & 0xffff;
+  ud3 = (c >> 32) & 0xffff;
+  ud4 = (c >> 48) & 0xffff;
 
   if ((ud4 == 0xffff && ud3 == 0xffff && ud2 == 0xffff && (ud1 & 0x8000))
       || (ud4 == 0 && ud3 == 0 && ud2 == 0 && ! (ud1 & 0x8000)))
@@ -10337,6 +10537,22 @@ rs6000_emit_set_long_const (rtx dest, HOST_WIDE_INT c)
       emit_move_insn (temp, GEN_INT (sext_hwi (ud1, 16)));
       emit_move_insn (dest, gen_rtx_XOR (DImode, temp,
 					 GEN_INT ((ud2 ^ 0xffff) << 16)));
+    }
+  else if (can_be_built_by_li_lis_and_rotldi (c, &shift, &mask)
+	   || can_be_built_by_li_lis_and_rldicl (c, &shift, &mask)
+	   || can_be_built_by_li_lis_and_rldicr (c, &shift, &mask)
+	   || can_be_built_by_li_and_rldic (c, &shift, &mask))
+    {
+      temp = !can_create_pseudo_p () ? dest : gen_reg_rtx (DImode);
+      unsigned HOST_WIDE_INT imm = (c | ~mask);
+      imm = (imm >> shift) | (imm << (HOST_BITS_PER_WIDE_INT - shift));
+
+      emit_move_insn (temp, GEN_INT (imm));
+      if (shift != 0)
+	temp = gen_rtx_ROTATE (DImode, temp, GEN_INT (shift));
+      if (mask != HOST_WIDE_INT_M1)
+	temp = gen_rtx_AND (DImode, temp, GEN_INT (mask));
+      emit_move_insn (dest, temp);
     }
   else if (ud3 == 0 && ud4 == 0)
     {
@@ -22156,7 +22372,9 @@ rs6000_rtx_costs (rtx x, machine_mode mode, int outer_code,
 	    *total = rs6000_cost->divsi;
 	}
       /* Add in shift and subtract for MOD unless we have a mod instruction. */
-      if (!TARGET_MODULO && (code == MOD || code == UMOD))
+      if ((!TARGET_MODULO
+	   || (RS6000_DISABLE_SCALAR_MODULO && SCALAR_INT_MODE_P (mode)))
+	 && (code == MOD || code == UMOD))
 	*total += COSTS_N_INSNS (2);
       return false;
 
@@ -23429,10 +23647,10 @@ altivec_expand_vec_perm_const (rtx target, rtx op0, rtx op1,
 		      && GET_MODE (XEXP (op0, 0)) != V8HImode)))
 	    continue;
 
-          /* For little-endian, the two input operands must be swapped
-             (or swapped back) to ensure proper right-to-left numbering
-             from 0 to 2N-1.  */
-	  if (swapped ^ !BYTES_BIG_ENDIAN
+	  /* For little-endian, the two input operands must be swapped
+	     (or swapped back) to ensure proper right-to-left numbering
+	     from 0 to 2N-1.  */
+	  if (swapped == BYTES_BIG_ENDIAN
 	      && icode != CODE_FOR_vsx_xxpermdi_v16qi)
 	    std::swap (op0, op1);
 	  if (imode != V16QImode)
@@ -25464,15 +25682,21 @@ rs6000_need_ipa_fn_target_info (const_tree decl,
 static bool
 rs6000_update_ipa_fn_target_info (unsigned int &info, const gimple *stmt)
 {
+#ifndef HAVE_AS_POWER10_HTM
   /* Assume inline asm can use any instruction features.  */
   if (gimple_code (stmt) == GIMPLE_ASM)
     {
-      /* Should set any bits we concerned, for now OPTION_MASK_HTM is
-	 the only bit we care about.  */
-      info |= RS6000_FN_TARGET_INFO_HTM;
+      const char *asm_str = gimple_asm_string (as_a<const gasm *> (stmt));
+      /* Ignore empty inline asm string.  */
+      if (strlen (asm_str) > 0)
+	/* Should set any bits we concerned, for now OPTION_MASK_HTM is
+	   the only bit we care about.  */
+	info |= RS6000_FN_TARGET_INFO_HTM;
       return false;
     }
-  else if (gimple_code (stmt) == GIMPLE_CALL)
+#endif
+
+  if (gimple_code (stmt) == GIMPLE_CALL)
     {
       tree fndecl = gimple_call_fndecl (stmt);
       if (fndecl && fndecl_built_in_p (fndecl, BUILT_IN_MD))
@@ -25500,49 +25724,44 @@ rs6000_can_inline_p (tree caller, tree callee)
   tree caller_tree = DECL_FUNCTION_SPECIFIC_TARGET (caller);
   tree callee_tree = DECL_FUNCTION_SPECIFIC_TARGET (callee);
 
-  /* If the callee has no option attributes, then it is ok to inline.  */
+  /* If the caller/callee has option attributes, then use them.
+     Otherwise, use the command line options.  */
   if (!callee_tree)
-    ret = true;
+    callee_tree = target_option_default_node;
+  if (!caller_tree)
+    caller_tree = target_option_default_node;
 
-  else
+  struct cl_target_option *callee_opts = TREE_TARGET_OPTION (callee_tree);
+  struct cl_target_option *caller_opts = TREE_TARGET_OPTION (caller_tree);
+
+  HOST_WIDE_INT callee_isa = callee_opts->x_rs6000_isa_flags;
+  HOST_WIDE_INT caller_isa = caller_opts->x_rs6000_isa_flags;
+  HOST_WIDE_INT explicit_isa = callee_opts->x_rs6000_isa_flags_explicit;
+
+  cgraph_node *callee_node = cgraph_node::get (callee);
+  if (ipa_fn_summaries && ipa_fn_summaries->get (callee_node) != NULL)
     {
-      HOST_WIDE_INT caller_isa;
-      struct cl_target_option *callee_opts = TREE_TARGET_OPTION (callee_tree);
-      HOST_WIDE_INT callee_isa = callee_opts->x_rs6000_isa_flags;
-      HOST_WIDE_INT explicit_isa = callee_opts->x_rs6000_isa_flags_explicit;
-
-      /* If the caller has option attributes, then use them.
-	 Otherwise, use the command line options.  */
-      if (caller_tree)
-	caller_isa = TREE_TARGET_OPTION (caller_tree)->x_rs6000_isa_flags;
-      else
-	caller_isa = rs6000_isa_flags;
-
-      cgraph_node *callee_node = cgraph_node::get (callee);
-      if (ipa_fn_summaries && ipa_fn_summaries->get (callee_node) != NULL)
+      unsigned int info = ipa_fn_summaries->get (callee_node)->target_info;
+      if ((info & RS6000_FN_TARGET_INFO_HTM) == 0)
 	{
-	  unsigned int info = ipa_fn_summaries->get (callee_node)->target_info;
-	  if ((info & RS6000_FN_TARGET_INFO_HTM) == 0)
-	    {
-	      callee_isa &= ~OPTION_MASK_HTM;
-	      explicit_isa &= ~OPTION_MASK_HTM;
-	    }
+	  callee_isa &= ~OPTION_MASK_HTM;
+	  explicit_isa &= ~OPTION_MASK_HTM;
 	}
-
-      /* Ignore -mpower8-fusion and -mpower10-fusion options for inlining
-	 purposes.  */
-      callee_isa &= ~(OPTION_MASK_P8_FUSION | OPTION_MASK_P10_FUSION);
-      explicit_isa &= ~(OPTION_MASK_P8_FUSION | OPTION_MASK_P10_FUSION);
-
-      /* The callee's options must be a subset of the caller's options, i.e.
-	 a vsx function may inline an altivec function, but a no-vsx function
-	 must not inline a vsx function.  However, for those options that the
-	 callee has explicitly enabled or disabled, then we must enforce that
-	 the callee's and caller's options match exactly; see PR70010.  */
-      if (((caller_isa & callee_isa) == callee_isa)
-	  && (caller_isa & explicit_isa) == (callee_isa & explicit_isa))
-	ret = true;
     }
+
+  /* Ignore -mpower8-fusion and -mpower10-fusion options for inlining
+     purposes.  */
+  callee_isa &= ~(OPTION_MASK_P8_FUSION | OPTION_MASK_P10_FUSION);
+  explicit_isa &= ~(OPTION_MASK_P8_FUSION | OPTION_MASK_P10_FUSION);
+
+  /* The callee's options must be a subset of the caller's options, i.e.
+     a vsx function may inline an altivec function, but a no-vsx function
+     must not inline a vsx function.  However, for those options that the
+     callee has explicitly enabled or disabled, then we must enforce that
+     the callee's and caller's options match exactly; see PR70010.  */
+  if (((caller_isa & callee_isa) == callee_isa)
+      && (caller_isa & explicit_isa) == (callee_isa & explicit_isa))
+    ret = true;
 
   if (TARGET_DEBUG_TARGET)
     fprintf (stderr, "rs6000_can_inline_p:, caller %s, callee %s, %s inline\n",

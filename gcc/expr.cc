@@ -988,18 +988,47 @@ alignment_for_piecewise_move (unsigned int max_pieces, unsigned int align)
   return align;
 }
 
-/* Return the widest QI vector, if QI_MODE is true, or integer mode
-   that is narrower than SIZE bytes.  */
+/* Return true if we know how to implement OP using vectors of bytes.  */
+static bool
+can_use_qi_vectors (by_pieces_operation op)
+{
+  return (op == COMPARE_BY_PIECES
+	  || op == SET_BY_PIECES
+	  || op == CLEAR_BY_PIECES);
+}
 
+/* Return true if optabs exists for the mode and certain by pieces
+   operations.  */
+static bool
+by_pieces_mode_supported_p (fixed_size_mode mode, by_pieces_operation op)
+{
+  if (optab_handler (mov_optab, mode) == CODE_FOR_nothing)
+    return false;
+
+  if ((op == SET_BY_PIECES || op == CLEAR_BY_PIECES)
+      && VECTOR_MODE_P (mode)
+      && optab_handler (vec_duplicate_optab, mode) == CODE_FOR_nothing)
+    return false;
+
+  if (op == COMPARE_BY_PIECES
+      && !can_compare_p (EQ, mode, ccp_jump))
+    return false;
+
+  return true;
+}
+
+/* Return the widest mode that can be used to perform part of an
+   operation OP on SIZE bytes.  Try to use QI vector modes where
+   possible.  */
 static fixed_size_mode
-widest_fixed_size_mode_for_size (unsigned int size, bool qi_vector)
+widest_fixed_size_mode_for_size (unsigned int size, by_pieces_operation op)
 {
   fixed_size_mode result = NARROWEST_INT_MODE;
 
   gcc_checking_assert (size > 1);
 
   /* Use QI vector only if size is wider than a WORD.  */
-  if (qi_vector && size > UNITS_PER_WORD)
+  if (can_use_qi_vectors (op) && size > UNITS_PER_WORD)
     {
       machine_mode mode;
       fixed_size_mode candidate;
@@ -1009,8 +1038,7 @@ widest_fixed_size_mode_for_size (unsigned int size, bool qi_vector)
 	  {
 	    if (GET_MODE_SIZE (candidate) >= size)
 	      break;
-	    if (optab_handler (vec_duplicate_optab, candidate)
-		!= CODE_FOR_nothing)
+	    if (by_pieces_mode_supported_p (candidate, op))
 	      result = candidate;
 	  }
 
@@ -1019,9 +1047,14 @@ widest_fixed_size_mode_for_size (unsigned int size, bool qi_vector)
     }
 
   opt_scalar_int_mode tmode;
+  scalar_int_mode mode;
   FOR_EACH_MODE_IN_CLASS (tmode, MODE_INT)
-    if (GET_MODE_SIZE (tmode.require ()) < size)
-      result = tmode.require ();
+    {
+      mode = tmode.require ();
+      if (GET_MODE_SIZE (mode) < size
+	  && by_pieces_mode_supported_p (mode, op))
+      result = mode;
+    }
 
   return result;
 }
@@ -1061,8 +1094,7 @@ by_pieces_ninsns (unsigned HOST_WIDE_INT l, unsigned int align,
     {
       /* NB: Round up L and ALIGN to the widest integer mode for
 	 MAX_SIZE.  */
-      mode = widest_fixed_size_mode_for_size (max_size,
-					      op == SET_BY_PIECES);
+      mode = widest_fixed_size_mode_for_size (max_size, op);
       if (optab_handler (mov_optab, mode) != CODE_FOR_nothing)
 	{
 	  unsigned HOST_WIDE_INT up = ROUND_UP (l, GET_MODE_SIZE (mode));
@@ -1076,8 +1108,7 @@ by_pieces_ninsns (unsigned HOST_WIDE_INT l, unsigned int align,
 
   while (max_size > 1 && l > 0)
     {
-      mode = widest_fixed_size_mode_for_size (max_size,
-					      op == SET_BY_PIECES);
+      mode = widest_fixed_size_mode_for_size (max_size, op);
       enum insn_code icode;
 
       unsigned int modesize = GET_MODE_SIZE (mode);
@@ -1317,8 +1348,8 @@ class op_by_pieces_d
   bool m_push;
   /* True if targetm.overlap_op_by_pieces_p () returns true.  */
   bool m_overlap_op_by_pieces;
-  /* True if QI vector mode can be used.  */
-  bool m_qi_vector_mode;
+  /* The type of operation that we're performing.  */
+  by_pieces_operation m_op;
 
   /* Virtual functions, overriden by derived classes for the specific
      operation.  */
@@ -1331,7 +1362,7 @@ class op_by_pieces_d
  public:
   op_by_pieces_d (unsigned int, rtx, bool, rtx, bool, by_pieces_constfn,
 		  void *, unsigned HOST_WIDE_INT, unsigned int, bool,
-		  bool = false);
+		  by_pieces_operation);
   void run ();
 };
 
@@ -1349,11 +1380,11 @@ op_by_pieces_d::op_by_pieces_d (unsigned int max_pieces, rtx to,
 				void *from_cfn_data,
 				unsigned HOST_WIDE_INT len,
 				unsigned int align, bool push,
-				bool qi_vector_mode)
+				by_pieces_operation op)
   : m_to (to, to_load, NULL, NULL),
     m_from (from, from_load, from_cfn, from_cfn_data),
     m_len (len), m_max_size (max_pieces + 1),
-    m_push (push), m_qi_vector_mode (qi_vector_mode)
+    m_push (push), m_op (op)
 {
   int toi = m_to.get_addr_inc ();
   int fromi = m_from.get_addr_inc ();
@@ -1375,8 +1406,7 @@ op_by_pieces_d::op_by_pieces_d (unsigned int max_pieces, rtx to,
     {
       /* Find the mode of the largest comparison.  */
       fixed_size_mode mode
-	= widest_fixed_size_mode_for_size (m_max_size,
-					   m_qi_vector_mode);
+	= widest_fixed_size_mode_for_size (m_max_size, m_op);
 
       m_from.decide_autoinc (mode, m_reverse, len);
       m_to.decide_autoinc (mode, m_reverse, len);
@@ -1401,7 +1431,7 @@ op_by_pieces_d::get_usable_mode (fixed_size_mode mode, unsigned int len)
       if (len >= size && prepare_mode (mode, m_align))
 	break;
       /* widest_fixed_size_mode_for_size checks SIZE > 1.  */
-      mode = widest_fixed_size_mode_for_size (size, m_qi_vector_mode);
+      mode = widest_fixed_size_mode_for_size (size, m_op);
     }
   while (1);
   return mode;
@@ -1414,7 +1444,7 @@ fixed_size_mode
 op_by_pieces_d::smallest_fixed_size_mode_for_size (unsigned int size)
 {
   /* Use QI vector only for > size of WORD.  */
-  if (m_qi_vector_mode && size > UNITS_PER_WORD)
+  if (can_use_qi_vectors (m_op) && size > UNITS_PER_WORD)
     {
       machine_mode mode;
       fixed_size_mode candidate;
@@ -1427,8 +1457,7 @@ op_by_pieces_d::smallest_fixed_size_mode_for_size (unsigned int size)
 	      break;
 
 	    if (GET_MODE_SIZE (candidate) >= size
-		&& (optab_handler (vec_duplicate_optab, candidate)
-		    != CODE_FOR_nothing))
+		&& by_pieces_mode_supported_p (candidate, m_op))
 	      return candidate;
 	  }
     }
@@ -1451,7 +1480,7 @@ op_by_pieces_d::run ()
 
   /* widest_fixed_size_mode_for_size checks M_MAX_SIZE > 1.  */
   fixed_size_mode mode
-    = widest_fixed_size_mode_for_size (m_max_size, m_qi_vector_mode);
+    = widest_fixed_size_mode_for_size (m_max_size, m_op);
   mode = get_usable_mode (mode, length);
 
   by_pieces_prev to_prev = { nullptr, mode };
@@ -1516,8 +1545,7 @@ op_by_pieces_d::run ()
       else
 	{
 	  /* widest_fixed_size_mode_for_size checks SIZE > 1.  */
-	  mode = widest_fixed_size_mode_for_size (size,
-						  m_qi_vector_mode);
+	  mode = widest_fixed_size_mode_for_size (size, m_op);
 	  mode = get_usable_mode (mode, length);
 	}
     }
@@ -1543,7 +1571,7 @@ class move_by_pieces_d : public op_by_pieces_d
   move_by_pieces_d (rtx to, rtx from, unsigned HOST_WIDE_INT len,
 		    unsigned int align)
     : op_by_pieces_d (MOVE_MAX_PIECES, to, false, from, true, NULL,
-		      NULL, len, align, PUSHG_P (to))
+		      NULL, len, align, PUSHG_P (to), MOVE_BY_PIECES)
   {
   }
   rtx finish_retmode (memop_ret);
@@ -1632,15 +1660,16 @@ move_by_pieces (rtx to, rtx from, unsigned HOST_WIDE_INT len,
 class store_by_pieces_d : public op_by_pieces_d
 {
   insn_gen_fn m_gen_fun;
+
   void generate (rtx, rtx, machine_mode) final override;
   bool prepare_mode (machine_mode, unsigned int) final override;
 
  public:
   store_by_pieces_d (rtx to, by_pieces_constfn cfn, void *cfn_data,
 		     unsigned HOST_WIDE_INT len, unsigned int align,
-		     bool qi_vector_mode)
+		     by_pieces_operation op)
     : op_by_pieces_d (STORE_MAX_PIECES, to, false, NULL_RTX, true, cfn,
-		      cfn_data, len, align, false, qi_vector_mode)
+		      cfn_data, len, align, false, op)
   {
   }
   rtx finish_retmode (memop_ret);
@@ -1729,8 +1758,8 @@ can_store_by_pieces (unsigned HOST_WIDE_INT len,
       max_size = STORE_MAX_PIECES + 1;
       while (max_size > 1 && l > 0)
 	{
-	  fixed_size_mode mode
-	    = widest_fixed_size_mode_for_size (max_size, memsetp);
+	  auto op = memsetp ? SET_BY_PIECES : STORE_BY_PIECES;
+	  auto mode = widest_fixed_size_mode_for_size (max_size, op);
 
 	  icode = optab_handler (mov_optab, mode);
 	  if (icode != CODE_FOR_nothing
@@ -1793,7 +1822,7 @@ store_by_pieces (rtx to, unsigned HOST_WIDE_INT len,
 		 optimize_insn_for_speed_p ()));
 
   store_by_pieces_d data (to, constfun, constfundata, len, align,
-			  memsetp);
+			  memsetp ? SET_BY_PIECES : STORE_BY_PIECES);
   data.run ();
 
   if (retmode != RETURN_BEGIN)
@@ -1814,7 +1843,7 @@ clear_by_pieces (rtx to, unsigned HOST_WIDE_INT len, unsigned int align)
   /* Use builtin_memset_read_str to support vector mode broadcast.  */
   char c = 0;
   store_by_pieces_d data (to, builtin_memset_read_str, &c, len, align,
-			  true);
+			  CLEAR_BY_PIECES);
   data.run ();
 }
 
@@ -1832,12 +1861,13 @@ class compare_by_pieces_d : public op_by_pieces_d
   void generate (rtx, rtx, machine_mode) final override;
   bool prepare_mode (machine_mode, unsigned int) final override;
   void finish_mode (machine_mode) final override;
+
  public:
   compare_by_pieces_d (rtx op0, rtx op1, by_pieces_constfn op1_cfn,
 		       void *op1_cfn_data, HOST_WIDE_INT len, int align,
 		       rtx_code_label *fail_label)
     : op_by_pieces_d (COMPARE_MAX_PIECES, op0, true, op1, true, op1_cfn,
-		      op1_cfn_data, len, align, false)
+		      op1_cfn_data, len, align, false, COMPARE_BY_PIECES)
   {
     m_fail_label = fail_label;
   }
@@ -5438,8 +5468,8 @@ optimize_bitfield_assignment_op (poly_uint64 pbitsize,
    *BITSTART and *BITEND.  */
 
 void
-get_bit_range (poly_uint64_pod *bitstart, poly_uint64_pod *bitend, tree exp,
-	       poly_int64_pod *bitpos, tree *offset)
+get_bit_range (poly_uint64 *bitstart, poly_uint64 *bitend, tree exp,
+	       poly_int64 *bitpos, tree *offset)
 {
   poly_int64 bitoffset;
   tree field, repr;
@@ -6083,13 +6113,10 @@ string_cst_read_str (void *data, void *, HOST_WIDE_INT offset,
       size_t l = TREE_STRING_LENGTH (str) - offset;
       memcpy (p, TREE_STRING_POINTER (str) + offset, l);
       memset (p + l, '\0', GET_MODE_SIZE (mode) - l);
-      return c_readstr (p, as_a <scalar_int_mode> (mode), false);
+      return c_readstr (p, mode, false);
     }
 
-  /* The by-pieces infrastructure does not try to pick a vector mode
-     for storing STRING_CST.  */
-  return c_readstr (TREE_STRING_POINTER (str) + offset,
-		    as_a <scalar_int_mode> (mode), false);
+  return c_readstr (TREE_STRING_POINTER (str) + offset, mode, false);
 }
 
 /* Generate code for computing expression EXP,
@@ -7443,7 +7470,7 @@ store_constructor (tree exp, rtx target, int cleared, poly_int64 size,
 	    break;
 	  }
 	/* Use sign-extension for uniform boolean vectors with
-	   integer modes.  */
+	   integer modes.  Effectively "vec_duplicate" for bitmasks.  */
 	if (!TREE_SIDE_EFFECTS (exp)
 	    && VECTOR_BOOLEAN_TYPE_P (type)
 	    && SCALAR_INT_MODE_P (mode)
@@ -7452,7 +7479,19 @@ store_constructor (tree exp, rtx target, int cleared, poly_int64 size,
 	  {
 	    rtx op0 = force_reg (TYPE_MODE (TREE_TYPE (elt)),
 				 expand_normal (elt));
-	    convert_move (target, op0, 0);
+	    rtx tmp = gen_reg_rtx (mode);
+	    convert_move (tmp, op0, 0);
+
+	    /* Ensure no excess bits are set.
+	       GCN needs this for nunits < 64.
+	       x86 needs this for nunits < 8.  */
+	    auto nunits = TYPE_VECTOR_SUBPARTS (type).to_constant ();
+	    if (maybe_ne (GET_MODE_PRECISION (mode), nunits))
+	      tmp = expand_binop (mode, and_optab, tmp,
+				  GEN_INT ((1 << nunits) - 1), target,
+				  true, OPTAB_DIRECT);
+	    if (tmp != target)
+	      emit_move_insn (target, tmp);
 	    break;
 	  }
 
@@ -7884,8 +7923,8 @@ store_field (rtx target, poly_int64 bitsize, poly_int64 bitpos,
    this case, but the address of the object can be found.  */
 
 tree
-get_inner_reference (tree exp, poly_int64_pod *pbitsize,
-		     poly_int64_pod *pbitpos, tree *poffset,
+get_inner_reference (tree exp, poly_int64 *pbitsize,
+		     poly_int64 *pbitpos, tree *poffset,
 		     machine_mode *pmode, int *punsignedp,
 		     int *preversep, int *pvolatilep)
 {
@@ -9332,13 +9371,6 @@ expand_expr_real_2 (sepops ops, rtx target, machine_mode tmode,
 	  op0 = expand_expr (treeop0, target, VOIDmode,
 			     modifier);
 
-	  /* If the signedness of the conversion differs and OP0 is
-	     a promoted SUBREG, clear that indication since we now
-	     have to do the proper extension.  */
-	  if (TYPE_UNSIGNED (TREE_TYPE (treeop0)) != unsignedp
-	      && GET_CODE (op0) == SUBREG)
-	    SUBREG_PROMOTED_VAR_P (op0) = 0;
-
 	  return REDUCE_BIT_FIELD (op0);
 	}
 
@@ -10650,6 +10682,25 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
   tree ssa_name = NULL_TREE;
   gimple *g;
 
+  /* Some ABIs define padding bits in _BitInt uninitialized.  Normally, RTL
+     expansion sign/zero extends integral types with less than mode precision
+     when reading from bit-fields and after arithmetic operations (see
+     REDUCE_BIT_FIELD in expand_expr_real_2) and on subsequent loads relies
+     on those extensions to have been already performed, but because of the
+     above for _BitInt they need to be sign/zero extended when reading from
+     locations that could be exposed to ABI boundaries (when loading from
+     objects in memory, or function arguments, return value).  Because we
+     internally extend after arithmetic operations, we can avoid doing that
+     when reading from SSA_NAMEs of vars.  */
+#define EXTEND_BITINT(expr) \
+  ((TREE_CODE (type) == BITINT_TYPE					\
+    && reduce_bit_field							\
+    && mode != BLKmode							\
+    && modifier != EXPAND_MEMORY					\
+    && modifier != EXPAND_WRITE						\
+    && modifier != EXPAND_CONST_ADDRESS)				\
+   ? reduce_to_bit_field_precision ((expr), NULL_RTX, type) : (expr))
+
   type = TREE_TYPE (exp);
   mode = TYPE_MODE (type);
   unsignedp = TYPE_UNSIGNED (type);
@@ -10823,6 +10874,13 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
       ssa_name = exp;
       decl_rtl = get_rtx_for_ssa_name (ssa_name);
       exp = SSA_NAME_VAR (ssa_name);
+      /* Optimize and avoid to EXTEND_BITINIT doing anything if it is an
+	 SSA_NAME computed within the current function.  In such case the
+	 value have been already extended before.  While if it is a function
+	 parameter, result or some memory location, we need to be prepared
+	 for some other compiler leaving the bits uninitialized.  */
+      if (!exp || VAR_P (exp))
+	reduce_bit_field = false;
       goto expand_decl_rtl;
 
     case VAR_DECL:
@@ -10956,7 +11014,7 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
 	    temp = expand_misaligned_mem_ref (temp, mode, unsignedp,
 					      MEM_ALIGN (temp), NULL_RTX, NULL);
 
-	  return temp;
+	  return EXTEND_BITINT (temp);
 	}
 
       if (exp)
@@ -11002,13 +11060,30 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
 	  temp = gen_lowpart_SUBREG (mode, decl_rtl);
 	  SUBREG_PROMOTED_VAR_P (temp) = 1;
 	  SUBREG_PROMOTED_SET (temp, unsignedp);
-	  return temp;
+	  return EXTEND_BITINT (temp);
 	}
 
-      return decl_rtl;
+      return EXTEND_BITINT (decl_rtl);
 
     case INTEGER_CST:
       {
+	if (TREE_CODE (type) == BITINT_TYPE)
+	  {
+	    unsigned int prec = TYPE_PRECISION (type);
+	    struct bitint_info info;
+	    bool ok = targetm.c.bitint_type_info (prec, &info);
+	    gcc_assert (ok);
+	    scalar_int_mode limb_mode
+	      = as_a <scalar_int_mode> (info.limb_mode);
+	    unsigned int limb_prec = GET_MODE_PRECISION (limb_mode);
+	    if (prec > limb_prec && prec > MAX_FIXED_MODE_SIZE)
+	      {
+		/* Emit large/huge _BitInt INTEGER_CSTs into memory.  */
+		exp = tree_output_constant_def (exp);
+		return expand_expr (exp, target, VOIDmode, modifier);
+	      }
+	  }
+
 	/* Given that TYPE_PRECISION (type) is not always equal to
 	   GET_MODE_PRECISION (TYPE_MODE (type)), we need to extend from
 	   the former to the latter according to the signedness of the
@@ -11187,7 +11262,7 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
 	    && align < GET_MODE_ALIGNMENT (mode))
 	  temp = expand_misaligned_mem_ref (temp, mode, unsignedp,
 					    align, NULL_RTX, NULL);
-	return temp;
+	return EXTEND_BITINT (temp);
       }
 
     case MEM_REF:
@@ -11248,19 +11323,17 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
 	set_mem_addr_space (temp, as);
 	if (TREE_THIS_VOLATILE (exp))
 	  MEM_VOLATILE_P (temp) = 1;
-	if (modifier != EXPAND_WRITE
-	    && modifier != EXPAND_MEMORY
-	    && !inner_reference_p
+	if (modifier == EXPAND_WRITE || modifier == EXPAND_MEMORY)
+	  return temp;
+	if (!inner_reference_p
 	    && mode != BLKmode
 	    && align < GET_MODE_ALIGNMENT (mode))
 	  temp = expand_misaligned_mem_ref (temp, mode, unsignedp, align,
 					    modifier == EXPAND_STACK_PARM
 					    ? NULL_RTX : target, alt_rtl);
-	if (reverse
-	    && modifier != EXPAND_MEMORY
-	    && modifier != EXPAND_WRITE)
+	if (reverse)
 	  temp = flip_storage_order (mode, temp);
-	return temp;
+	return EXTEND_BITINT (temp);
       }
 
     case ARRAY_REF:
@@ -11812,6 +11885,8 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
 	    && modifier != EXPAND_WRITE)
 	  op0 = flip_storage_order (mode1, op0);
 
+	op0 = EXTEND_BITINT (op0);
+
 	if (mode == mode1 || mode1 == BLKmode || mode1 == tmode
 	    || modifier == EXPAND_CONST_ADDRESS
 	    || modifier == EXPAND_INITIALIZER)
@@ -12157,6 +12232,7 @@ expand_expr_real_1 (tree exp, rtx target, machine_mode tmode,
       return expand_expr_real_2 (&ops, target, tmode, modifier);
     }
 }
+#undef EXTEND_BITINT
 
 /* Subroutine of above: reduce EXP to the precision of TYPE (in the
    signedness of TYPE), possibly returning the result in TARGET.
@@ -13172,14 +13248,15 @@ do_store_flag (sepops ops, rtx target, machine_mode mode)
 	  || integer_pow2p (arg1))
       && (TYPE_PRECISION (ops->type) != 1 || TYPE_UNSIGNED (ops->type)))
     {
-      wide_int nz = tree_nonzero_bits (arg0);
-      gimple *srcstmt = get_def_for_expr (arg0, BIT_AND_EXPR);
+      tree narg0 = arg0;
+      wide_int nz = tree_nonzero_bits (narg0);
+      gimple *srcstmt = get_def_for_expr (narg0, BIT_AND_EXPR);
       /* If the defining statement was (x & POW2), then use that instead of
 	 the non-zero bits.  */
       if (srcstmt && integer_pow2p (gimple_assign_rhs2 (srcstmt)))
 	{
 	  nz = wi::to_wide (gimple_assign_rhs2 (srcstmt));
-	  arg0 = gimple_assign_rhs1 (srcstmt);
+	  narg0 = gimple_assign_rhs1 (srcstmt);
 	}
 
       if (wi::popcount (nz) == 1
@@ -13193,7 +13270,7 @@ do_store_flag (sepops ops, rtx target, machine_mode mode)
 
 	  type = lang_hooks.types.type_for_mode (mode, unsignedp);
 	  return expand_single_bit_test (loc, tcode,
-					 arg0,
+					 narg0,
 					 bitnum, type, target, mode);
 	}
     }

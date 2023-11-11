@@ -154,6 +154,7 @@ bits_freestanding = \
 	${bits_srcdir}/stl_raw_storage_iter.h \
 	${bits_srcdir}/stl_relops.h \
 	${bits_srcdir}/stl_uninitialized.h \
+	${bits_srcdir}/version.h \
 	${bits_srcdir}/string_view.tcc \
 	${bits_srcdir}/uniform_int_dist.h \
 	${bits_srcdir}/unique_ptr.h \
@@ -849,6 +850,9 @@ c_base_builddir = .
 c_base_freestanding = \
 	${c_base_srcdir}/cfloat \
 	${c_base_srcdir}/climits \
+	${c_base_srcdir}/cstdalign \
+	${c_base_srcdir}/cstdarg \
+	${c_base_srcdir}/cstdbool \
 	${c_base_srcdir}/cstddef \
 	${c_base_srcdir}/cstdint \
 	${c_base_srcdir}/cstdlib
@@ -869,9 +873,6 @@ c_base_headers = \
 	${c_base_srcdir}/cmath \
 	${c_base_srcdir}/csetjmp \
 	${c_base_srcdir}/csignal \
-	${c_base_srcdir}/cstdalign \
-	${c_base_srcdir}/cstdarg \
-	${c_base_srcdir}/cstdbool \
 	${c_base_srcdir}/cstdio \
 	${c_base_srcdir}/cstring \
 	${c_base_srcdir}/ctgmath \
@@ -1113,7 +1114,8 @@ allcreated = \
 	${host_builddir}/c++config.h \
 	${host_builddir}/largefile-config.h \
 	${thread_host_headers} \
-	${pch_build}
+	${pch_build} \
+	${bits_srcdir}/version.h
 
 # Here are the rules for building the headers
 all-local: ${allstamped} ${allcreated}
@@ -1462,6 +1464,12 @@ ${pch2_output}: ${pch2_source} ${pch1_output}
 ${pch3_output}: ${pch3_source} ${pch2_output}
 	-mkdir -p ${pch3_output_builddir}
 	$(CXX) $(PCHFLAGS) $(AM_CPPFLAGS) -O2 -g ${pch3_source} -o $@
+
+# AutoGen <bits/version.h>.
+.PHONY: update-version
+update-version:
+	cd ${bits_srcdir} && \
+	autogen version.def
 
 # The real deal.
 install-data-local: install-headers

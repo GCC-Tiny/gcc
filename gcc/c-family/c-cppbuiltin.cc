@@ -279,7 +279,7 @@ builtin_define_float_constants (const char *name_prefix,
   /* The difference between 1 and the least value greater than 1 that is
      representable in the given floating point type, b**(1-p).  */
   sprintf (name, "__%s_EPSILON__", name_prefix);
-  if (fmt->pnan < fmt->p && (c_dialect_cxx () || !flag_isoc2x))
+  if (fmt->pnan < fmt->p && (c_dialect_cxx () || !flag_isoc23))
     /* This is an IBM extended double format, so 1.0 + any double is
        representable precisely.  */
       sprintf (buf, "0x1p%d", fmt->emin - fmt->p);
@@ -318,7 +318,7 @@ builtin_define_float_constants (const char *name_prefix,
       builtin_define_with_int_value (name, 1);
     }
 
-  /* For C2x *_IS_IEC_60559.  0 means the type does not match an IEC
+  /* For C23 *_IS_IEC_60559.  0 means the type does not match an IEC
      60559 format, 1 that it matches a format but not necessarily
      operations.  */
   sprintf (name, "__%s_IS_IEC_60559__", name_prefix);
@@ -1089,7 +1089,7 @@ c_cpp_builtins (cpp_reader *pfile)
 	}
       if (flag_concepts)
         {
-	  if (cxx_dialect >= cxx20)
+	  if (cxx_dialect >= cxx20 || !flag_concepts_ts)
 	    cpp_define (pfile, "__cpp_concepts=202002L");
           else
             cpp_define (pfile, "__cpp_concepts=201507L");
@@ -1189,6 +1189,29 @@ c_cpp_builtins (cpp_reader *pfile)
   builtin_define_type_width ("__WINT_WIDTH__", wint_type_node, NULL_TREE);
   builtin_define_type_width ("__PTRDIFF_WIDTH__", ptrdiff_type_node, NULL_TREE);
   builtin_define_type_width ("__SIZE_WIDTH__", size_type_node, NULL_TREE);
+
+  if (!c_dialect_cxx ())
+    {
+      struct bitint_info info;
+      /* For now, restrict __BITINT_MAXWIDTH__ to what can be represented in
+	 wide_int and widest_int.  */
+      if (targetm.c.bitint_type_info (WIDE_INT_MAX_PRECISION - 1, &info))
+	{
+	  cpp_define_formatted (pfile, "__BITINT_MAXWIDTH__=%d",
+				(int) WIDE_INT_MAX_PRECISION - 1);
+	  if (flag_building_libgcc)
+	    {
+	      scalar_int_mode limb_mode
+		= as_a <scalar_int_mode> (info.limb_mode);
+	      cpp_define_formatted (pfile, "__LIBGCC_BITINT_LIMB_WIDTH__=%d",
+				    (int) GET_MODE_PRECISION (limb_mode));
+	      cpp_define_formatted (pfile, "__LIBGCC_BITINT_ORDER__=%s",
+				    info.big_endian
+				    ? "__ORDER_BIG_ENDIAN__"
+				    : "__ORDER_LITTLE_ENDIAN__");
+	    }
+	}
+    }
 
   if (c_dialect_cxx ())
     for (i = 0; i < NUM_INT_N_ENTS; i ++)

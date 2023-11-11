@@ -1339,7 +1339,7 @@ maybe_substitute_reqs_for (tree reqs, const_tree decl)
   if (DECL_UNIQUE_FRIEND_P (decl) && DECL_TEMPLATE_INFO (decl))
     {
       tree tmpl = DECL_TI_TEMPLATE (decl);
-      tree outer_args = outer_template_args (tmpl);
+      tree outer_args = outer_template_args (decl);
       processing_template_decl_sentinel s;
       if (PRIMARY_TEMPLATE_P (tmpl)
 	  || uses_template_parms (outer_args))
@@ -1607,7 +1607,8 @@ finish_shorthand_constraint (tree decl, tree constr)
 
   /* Make the check a fold-expression if needed.  */
   if (apply_to_each_p && declared_pack_p)
-    check = finish_left_unary_fold_expr (check, TRUTH_ANDIF_EXPR);
+    check = finish_left_unary_fold_expr (DECL_SOURCE_LOCATION (decl),
+					 check, TRUTH_ANDIF_EXPR);
 
   return check;
 }
