@@ -74,6 +74,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-modref-tree.h"
 #include "ipa-modref.h"
 #include "tree-ssa-sccvn.h"
+#include "alloc-pool.h"
+#include "symbol-summary.h"
+#include "ipa-prop.h"
+#include "target.h"
 
 /* This algorithm is based on the SCC algorithm presented by Keith
    Cooper and L. Taylor Simpson in "SCC-Based Value numbering"
@@ -1899,6 +1903,7 @@ struct vn_walk_cb_data
   alias_set_type first_base_set;
   splay_tree known_ranges;
   obstack ranges_obstack;
+  static constexpr HOST_WIDE_INT bufsize = 64;
 };
 
 vn_walk_cb_data::~vn_walk_cb_data ()
@@ -1969,7 +1974,6 @@ vn_walk_cb_data::push_partial_def (pd_data pd,
 				   HOST_WIDE_INT offseti,
 				   HOST_WIDE_INT maxsizei)
 {
-  const HOST_WIDE_INT bufsize = 64;
   /* We're using a fixed buffer for encoding so fail early if the object
      we want to interpret is bigger.  */
   if (maxsizei > bufsize * BITS_PER_UNIT
@@ -2327,7 +2331,7 @@ vn_walk_cb_data::push_partial_def (pd_data pd,
    with the current VUSE and performs the expression lookup.  */
 
 static void *
-vn_reference_lookup_2 (ao_ref *op ATTRIBUTE_UNUSED, tree vuse, void *data_)
+vn_reference_lookup_2 (ao_ref *op, tree vuse, void *data_)
 {
   vn_walk_cb_data *data = (vn_walk_cb_data *)data_;
   vn_reference_t vr = data->vr;
@@ -2359,6 +2363,35 @@ vn_reference_lookup_2 (ao_ref *op ATTRIBUTE_UNUSED, tree vuse, void *data_)
       if ((*slot)->result && data->saved_operands.exists ())
 	return data->finish (vr->set, vr->base_set, (*slot)->result);
       return *slot;
+    }
+
+  if (SSA_NAME_IS_DEFAULT_DEF (vuse))
+    {
+      HOST_WIDE_INT op_offset, op_size;
+      tree v = NULL_TREE;
+      tree base = ao_ref_base (op);
+
+      if (base
+	  && op->offset.is_constant (&op_offset)
+	  && op->size.is_constant (&op_size)
+	  && op->max_size_known_p ()
+	  && known_eq (op->size, op->max_size))
+	{
+	  if (TREE_CODE (base) == PARM_DECL)
+	    v = ipcp_get_aggregate_const (cfun, base, false, op_offset,
+					  op_size);
+	  else if (TREE_CODE (base) == MEM_REF
+		   && integer_zerop (TREE_OPERAND (base, 1))
+		   && TREE_CODE (TREE_OPERAND (base, 0)) == SSA_NAME
+		   && SSA_NAME_IS_DEFAULT_DEF (TREE_OPERAND (base, 0))
+		   && (TREE_CODE (SSA_NAME_VAR (TREE_OPERAND (base, 0)))
+		       == PARM_DECL))
+	    v = ipcp_get_aggregate_const (cfun,
+					  SSA_NAME_VAR (TREE_OPERAND (base, 0)),
+					  true, op_offset, op_size);
+	}
+      if (v)
+	return data->finish (vr->set, vr->base_set, v);
     }
 
   return NULL;
@@ -5381,6 +5414,7 @@ visit_nary_op (tree lhs, gassign *stmt)
 	  && CHAR_BIT == 8
 	  && BITS_PER_UNIT == 8
 	  && BYTES_BIG_ENDIAN == WORDS_BIG_ENDIAN
+	  && TYPE_PRECISION (type) <= vn_walk_cb_data::bufsize * BITS_PER_UNIT
 	  && !integer_all_onesp (gimple_assign_rhs2 (stmt))
 	  && !integer_zerop (gimple_assign_rhs2 (stmt)))
 	{
@@ -5713,9 +5747,12 @@ visit_reference_op_load (tree lhs, tree op, gimple *stmt)
     {
       /* Avoid the type punning in case the result mode has padding where
 	 the op we lookup has not.  */
-      if (maybe_lt (GET_MODE_PRECISION (TYPE_MODE (TREE_TYPE (result))),
-		    GET_MODE_PRECISION (TYPE_MODE (TREE_TYPE (op)))))
+      if (TYPE_MODE (TREE_TYPE (result)) != BLKmode
+	  && maybe_lt (GET_MODE_PRECISION (TYPE_MODE (TREE_TYPE (result))),
+		       GET_MODE_PRECISION (TYPE_MODE (TREE_TYPE (op)))))
 	result = NULL_TREE;
+      else if (CONSTANT_CLASS_P (result))
+	result = const_unop (VIEW_CONVERT_EXPR, TREE_TYPE (op), result);
       else
 	{
 	  /* We will be setting the value number of lhs to the value number
@@ -5874,6 +5911,7 @@ static bool
 visit_phi (gimple *phi, bool *inserted, bool backedges_varying_p)
 {
   tree result, sameval = VN_TOP, seen_undef = NULL_TREE;
+  bool seen_undef_visited = false;
   tree backedge_val = NULL_TREE;
   bool seen_non_backedge = false;
   tree sameval_base = NULL_TREE;
@@ -5904,10 +5942,12 @@ visit_phi (gimple *phi, bool *inserted, bool backedges_varying_p)
 	if (def == PHI_RESULT (phi))
 	  continue;
 	++n_executable;
+	bool visited = true;
 	if (TREE_CODE (def) == SSA_NAME)
 	  {
+	    tree val = SSA_VAL (def, &visited);
 	    if (!backedges_varying_p || !(e->flags & EDGE_DFS_BACK))
-	      def = SSA_VAL (def);
+	      def = val;
 	    if (e->flags & EDGE_DFS_BACK)
 	      backedge_val = def;
 	  }
@@ -5919,7 +5959,16 @@ visit_phi (gimple *phi, bool *inserted, bool backedges_varying_p)
 	else if (TREE_CODE (def) == SSA_NAME
 		 && ! virtual_operand_p (def)
 		 && ssa_undefined_value_p (def, false))
-	  seen_undef = def;
+	  {
+	    if (!seen_undef
+		/* Avoid having not visited undefined defs if we also have
+		   a visited one.  */
+		|| (!seen_undef_visited && visited))
+	      {
+		seen_undef = def;
+		seen_undef_visited = visited;
+	      }
+	  }
 	else if (sameval == VN_TOP)
 	  {
 	    sameval = def;
@@ -6969,8 +7018,11 @@ eliminate_dom_walker::eliminate_stmt (basic_block b, gimple_stmt_iterator *gsi)
 	      || !DECL_BIT_FIELD_TYPE (TREE_OPERAND (lhs, 1)))
 	  && !type_has_mode_precision_p (TREE_TYPE (lhs)))
 	{
-	  if (TREE_CODE (lhs) == COMPONENT_REF
-	      || TREE_CODE (lhs) == MEM_REF)
+	  if (TREE_CODE (TREE_TYPE (lhs)) == BITINT_TYPE
+	      && TYPE_PRECISION (TREE_TYPE (lhs)) > MAX_FIXED_MODE_SIZE)
+	    lookup_lhs = NULL_TREE;
+	  else if (TREE_CODE (lhs) == COMPONENT_REF
+		   || TREE_CODE (lhs) == MEM_REF)
 	    {
 	      tree ltype = build_nonstandard_integer_type
 				(TREE_INT_CST_LOW (TYPE_SIZE (TREE_TYPE (lhs))),
@@ -7359,7 +7411,8 @@ eliminate_dom_walker::before_dom_children (basic_block b)
 	      || virtual_operand_p (arg))
 	    continue;
 	  tree sprime = eliminate_avail (b, arg);
-	  if (sprime && may_propagate_copy (arg, sprime))
+	  if (sprime && may_propagate_copy (arg, sprime,
+					    !(e->flags & EDGE_ABNORMAL)))
 	    propagate_value (use_p, sprime);
 	}
 
@@ -7650,7 +7703,11 @@ rpo_elim::eliminate_avail (basic_block bb, tree op)
     {
       if (SSA_NAME_IS_DEFAULT_DEF (valnum))
 	return valnum;
-      vn_avail *av = VN_INFO (valnum)->avail;
+      vn_ssa_aux_t valnum_info = VN_INFO (valnum);
+      /* See above.  */
+      if (!valnum_info->visited)
+	return valnum;
+      vn_avail *av = valnum_info->avail;
       if (!av)
 	return NULL_TREE;
       if (av->location == bb->index)
@@ -8152,7 +8209,7 @@ process_bb (rpo_elim &avail, basic_block bb,
 					    arg);
 	  if (sprime
 	      && sprime != arg
-	      && may_propagate_copy (arg, sprime))
+	      && may_propagate_copy (arg, sprime, !(e->flags & EDGE_ABNORMAL)))
 	    propagate_value (use_p, sprime);
 	}
 

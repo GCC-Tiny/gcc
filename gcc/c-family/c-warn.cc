@@ -1306,8 +1306,10 @@ conversion_warning (location_t loc, tree type, tree expr, tree result)
       }
 
     case BIT_AND_EXPR:
-      if (TREE_CODE (expr_type) == INTEGER_TYPE
-	  && TREE_CODE (type) == INTEGER_TYPE)
+      if ((TREE_CODE (expr_type) == INTEGER_TYPE
+	   || TREE_CODE (expr_type) == BITINT_TYPE)
+	  && (TREE_CODE (type) == INTEGER_TYPE
+	      || TREE_CODE (type) == BITINT_TYPE))
 	for (int i = 0; i < 2; ++i)
 	  {
 	    tree op = TREE_OPERAND (expr, i);
@@ -1348,9 +1350,9 @@ conversion_warning (location_t loc, tree type, tree expr, tree result)
 	  break;
 
 	if (arith_ops
-	    && global_dc->option_enabled (warnopt,
-					  global_dc->lang_mask,
-					  global_dc->option_state))
+	    && global_dc->m_option_enabled (warnopt,
+					    global_dc->m_lang_mask,
+					    global_dc->m_option_state))
 	  {
 	    for (int i = 0; i < arith_ops; ++i)
 	      {
@@ -1416,6 +1418,7 @@ warnings_for_convert_and_check (location_t loc, tree type, tree expr,
 
   if (TREE_CODE (expr) == INTEGER_CST
       && (TREE_CODE (type) == INTEGER_TYPE
+	  || TREE_CODE (type) == BITINT_TYPE
 	  || (TREE_CODE (type) == ENUMERAL_TYPE
 	      && TREE_CODE (ENUM_UNDERLYING_TYPE (type)) != BOOLEAN_TYPE))
       && !int_fits_type_p (expr, type))
@@ -1466,9 +1469,10 @@ warnings_for_convert_and_check (location_t loc, tree type, tree expr,
 	}
       /* No warning for converting 0x80000000 to int.  */
       else if (pedantic
-	       && (TREE_CODE (exprtype) != INTEGER_TYPE
-		   || TYPE_PRECISION (exprtype)
-		   != TYPE_PRECISION (type)))
+	       && ((TREE_CODE (exprtype) != INTEGER_TYPE
+		    && TREE_CODE (exprtype) != BITINT_TYPE)
+		   || (TYPE_PRECISION (exprtype)
+		       != TYPE_PRECISION (type))))
 	{
 	  if (cst)
 	    warning_at (loc, OPT_Woverflow,
@@ -1513,13 +1517,15 @@ match_case_to_enum_1 (tree key, tree type, tree label)
     return;
 
   char buf[WIDE_INT_PRINT_BUFFER_SIZE];
+  wide_int w = wi::to_wide (key);
 
+  gcc_assert (w.get_precision () <= WIDE_INT_MAX_INL_PRECISION);
   if (tree_fits_uhwi_p (key))
-    print_dec (wi::to_wide (key), buf, UNSIGNED);
+    print_dec (w, buf, UNSIGNED);
   else if (tree_fits_shwi_p (key))
-    print_dec (wi::to_wide (key), buf, SIGNED);
+    print_dec (w, buf, SIGNED);
   else
-    print_hex (wi::to_wide (key), buf);
+    print_hex (w, buf);
 
   if (TYPE_NAME (type) == NULL_TREE)
     warning_at (DECL_SOURCE_LOCATION (CASE_LABEL (label)),
@@ -2945,7 +2951,7 @@ warn_for_multistatement_macros (location_t body_loc, location_t next_loc,
   while (linemap_macro_expansion_map_p (guard_map))
     {
       const line_map_macro *mm = linemap_check_macro (guard_map);
-      guard_loc_exp = MACRO_MAP_EXPANSION_POINT_LOCATION (mm);
+      guard_loc_exp = mm->get_expansion_point_location ();
       guard_map = linemap_lookup (line_table, guard_loc_exp);
       if (guard_map == body_map)
 	return;
@@ -3030,7 +3036,7 @@ check_address_or_pointer_of_packed_member (tree type, tree rhs)
 	  rhs = TREE_TYPE (rhs);	/* Pointer type.  */
 	  /* We could be called while processing a template and RHS could be
 	     a functor.  In that case it's a class, not a pointer.  */
-	  if (!POINTER_TYPE_P (rhs))
+	  if (!rhs || !POINTER_TYPE_P (rhs))
 	    return NULL_TREE;
 	  rhs = TREE_TYPE (rhs);	/* Function type.  */
 	  rhstype = TREE_TYPE (rhs);

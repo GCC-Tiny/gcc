@@ -1688,6 +1688,31 @@ package body Sem_Ch3 is
    -------------------------------------
 
    procedure Add_Internal_Interface_Entities (Tagged_Type : Entity_Id) is
+
+      function Error_Posted_In_Formals (Subp : Entity_Id) return Boolean;
+      --  Determine if an error has been posted in some formal of Subp.
+
+      -----------------------------
+      -- Error_Posted_In_Formals --
+      -----------------------------
+
+      function Error_Posted_In_Formals (Subp : Entity_Id) return Boolean is
+         Formal : Entity_Id := First_Formal (Subp);
+
+      begin
+         while Present (Formal) loop
+            if Error_Posted (Formal) then
+               return True;
+            end if;
+
+            Next_Formal (Formal);
+         end loop;
+
+         return False;
+      end Error_Posted_In_Formals;
+
+      --  Local variables
+
       Elmt          : Elmt_Id;
       Iface         : Entity_Id;
       Iface_Elmt    : Elmt_Id;
@@ -1740,6 +1765,86 @@ package body Sem_Ch3 is
                end if;
 
                pragma Assert (Present (Prim));
+
+               --  Check subtype conformance; we skip this check if errors have
+               --  been reported in the primitive (or in the formals of the
+               --  primitive) because Find_Primitive_Covering_Interface relies
+               --  on the subprogram Type_Conformant to locate the primitive,
+               --  and reports errors if the formals don't match.
+
+               if not Error_Posted (Prim)
+                 and then not Error_Posted_In_Formals (Prim)
+               then
+                  declare
+                     Alias_Prim : Entity_Id;
+                     Alias_Typ  : Entity_Id;
+                     Err_Loc    : Node_Id := Empty;
+                     Ret_Type   : Entity_Id;
+
+                  begin
+                     --  For inherited primitives, in case of reporting an
+                     --  error, the error must be reported on this primitive
+                     --  (i.e. in the name of its type declaration); otherwise
+                     --  the error would be reported in the formal of the
+                     --  alias primitive defined on its parent type.
+
+                     if Nkind (Parent (Prim)) = N_Full_Type_Declaration then
+                        Err_Loc := Prim;
+                     end if;
+
+                     --  Check subtype conformance of procedures, functions
+                     --  with matching return type, or functions not returning
+                     --  interface types.
+
+                     if Ekind (Prim) = E_Procedure
+                       or else Etype (Iface_Prim) = Etype (Prim)
+                       or else not Is_Interface (Etype (Iface_Prim))
+                     then
+                        Check_Subtype_Conformant
+                          (New_Id  => Prim,
+                           Old_Id  => Iface_Prim,
+                           Err_Loc => Err_Loc,
+                           Skip_Controlling_Formals => True);
+
+                     --  Check subtype conformance of functions returning an
+                     --  interface type; temporarily force both entities to
+                     --  return the same type. Required because subprogram
+                     --  Subtype_Conformant does not handle this case.
+
+                     else
+                        Ret_Type := Etype (Iface_Prim);
+                        Set_Etype (Iface_Prim, Etype (Prim));
+
+                        Check_Subtype_Conformant
+                          (New_Id  => Prim,
+                           Old_Id  => Iface_Prim,
+                           Err_Loc => Err_Loc,
+                           Skip_Controlling_Formals => True);
+
+                        Set_Etype (Iface_Prim, Ret_Type);
+                     end if;
+
+                     --  Complete the error when reported on inherited
+                     --  primitives.
+
+                     if Nkind (Parent (Prim)) = N_Full_Type_Declaration
+                       and then (Error_Posted (Prim)
+                                   or else Error_Posted_In_Formals (Prim))
+                       and then Present (Alias (Prim))
+                     then
+                        Alias_Prim := Ultimate_Alias (Prim);
+                        Alias_Typ  := Find_Dispatching_Type (Alias_Prim);
+
+                        if Alias_Typ /= Tagged_Type
+                          and then Is_Ancestor (Alias_Typ, Tagged_Type)
+                        then
+                           Error_Msg_Sloc := Sloc (Alias_Prim);
+                           Error_Msg_N
+                             ("in primitive inherited from #!", Prim);
+                        end if;
+                     end if;
+                  end;
+               end if;
 
                --  Ada 2012 (AI05-0197): If the name of the covering primitive
                --  differs from the name of the interface primitive then it is
@@ -2206,9 +2311,7 @@ package body Sem_Ch3 is
 
       Set_Original_Record_Component (Id, Id);
 
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, Id);
-      end if;
+      Analyze_Aspect_Specifications (N, Id);
 
       Analyze_Dimension (N);
    end Analyze_Component_Declaration;
@@ -3280,7 +3383,7 @@ package body Sem_Ch3 is
       --  case we bypass this.
 
       if Ekind (T) /= E_Void then
-         if not Present (Direct_Primitive_Operations (T)) then
+         if No (Direct_Primitive_Operations (T)) then
             if Etype (T) = T then
                Set_Direct_Primitive_Operations (T, New_Elmt_List);
 
@@ -3292,8 +3395,7 @@ package body Sem_Ch3 is
 
             elsif Etype (T) = Base_Type (T) then
 
-               if not Present (Direct_Primitive_Operations (Base_Type (T)))
-               then
+               if No (Direct_Primitive_Operations (Base_Type (T))) then
                   Set_Direct_Primitive_Operations
                     (Base_Type (T), New_Elmt_List);
                end if;
@@ -3311,7 +3413,7 @@ package body Sem_Ch3 is
          --  If T already has a Direct_Primitive_Operations list but its
          --  base type doesn't then set the base type's list to T's list.
 
-         elsif not Present (Direct_Primitive_Operations (Base_Type (T))) then
+         elsif No (Direct_Primitive_Operations (Base_Type (T))) then
             Set_Direct_Primitive_Operations
               (Base_Type (T), Direct_Primitive_Operations (T));
          end if;
@@ -3421,25 +3523,22 @@ package body Sem_Ch3 is
       --  them to the entity for the type which is currently the partial
       --  view, but which is the one that will be frozen.
 
-      if Has_Aspects (N) then
+      --  In most cases the partial view is a private type, and both views
+      --  appear in different declarative parts. In the unusual case where
+      --  the partial view is incomplete, perform the analysis on the
+      --  full view, to prevent freezing anomalies with the corresponding
+      --  class-wide type, which otherwise might be frozen before the
+      --  dispatch table is built.
 
-         --  In most cases the partial view is a private type, and both views
-         --  appear in different declarative parts. In the unusual case where
-         --  the partial view is incomplete, perform the analysis on the
-         --  full view, to prevent freezing anomalies with the corresponding
-         --  class-wide type, which otherwise might be frozen before the
-         --  dispatch table is built.
+      if Prev /= Def_Id
+        and then Ekind (Prev) /= E_Incomplete_Type
+      then
+         Analyze_Aspect_Specifications (N, Prev);
 
-         if Prev /= Def_Id
-           and then Ekind (Prev) /= E_Incomplete_Type
-         then
-            Analyze_Aspect_Specifications (N, Prev);
+      --  Normal case
 
-         --  Normal case
-
-         else
-            Analyze_Aspect_Specifications (N, Def_Id);
-         end if;
+      else
+         Analyze_Aspect_Specifications (N, Def_Id);
       end if;
 
       if Is_Derived_Type (Prev)
@@ -4943,9 +5042,11 @@ package body Sem_Ch3 is
             Apply_Length_Check (E, T);
          end if;
 
-      --  When possible, build the default subtype
+      --  When possible, and not a deferred constant, build the default subtype
 
-      elsif Build_Default_Subtype_OK (T) then
+      elsif Build_Default_Subtype_OK (T)
+        and then (not Constant_Present (N) or else Present (E))
+      then
          if No (E) then
             Act_T := Build_Default_Subtype (T, N);
          else
@@ -5217,9 +5318,7 @@ package body Sem_Ch3 is
          Set_Encapsulating_State (Id, Empty);
       end if;
 
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, Id);
-      end if;
+      Analyze_Aspect_Specifications (N, Id);
 
       Analyze_Dimension (N);
 
@@ -5498,9 +5597,7 @@ package body Sem_Ch3 is
       Set_Has_Private_Extension (Parent_Type);
 
    <<Leave>>
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, T);
-      end if;
+      Analyze_Aspect_Specifications (N, T);
    end Analyze_Private_Extension_Declaration;
 
    ---------------------------------
@@ -6120,9 +6217,7 @@ package body Sem_Ch3 is
       Check_Eliminated (Id);
 
    <<Leave>>
-      if Has_Aspects (N) then
-         Analyze_Aspect_Specifications (N, Id);
-      end if;
+      Analyze_Aspect_Specifications (N, Id);
 
       Analyze_Dimension (N);
 
@@ -7089,6 +7184,11 @@ package body Sem_Ch3 is
                     Constraint => Constraint (Indic)));
 
             Rewrite (N, New_Indic);
+
+            --  Keep the aspects from the original node
+
+            Move_Aspects (Original_Node (N), N);
+
             Analyze (N);
          end if;
 
@@ -7268,6 +7368,10 @@ package body Sem_Ch3 is
                 Defining_Identifier => Derived_Type,
                 Subtype_Indication  => New_Indic));
 
+            --  Keep the aspects from the original node
+
+            Move_Aspects (Original_Node (N), N);
+
             Analyze (N);
             return;
          end;
@@ -7288,7 +7392,7 @@ package body Sem_Ch3 is
       Set_Is_Constrained
         (Derived_Type,
          (Is_Constrained (Parent_Type) or else Constraint_Present)
-           and then not Present (Discriminant_Specifications (N)));
+           and then No (Discriminant_Specifications (N)));
 
       if Constraint_Present then
          if not Has_Discriminants (Parent_Type) then
@@ -7696,12 +7800,16 @@ package body Sem_Ch3 is
                    Make_Range_Constraint (Loc,
                      Range_Expression => Rang_Expr))));
 
+         --  Keep the aspects from the orignal node
+
+         Move_Aspects (Original_Node (N), N);
+
          Analyze (N);
 
          --  Propagate the aspects from the original type declaration to the
          --  declaration of the implicit base.
 
-         Move_Aspects (From => Original_Node (N), To => Type_Decl);
+         Copy_Aspects (From => N, To => Type_Decl);
 
          --  Apply a range check. Since this range expression doesn't have an
          --  Etype, we have to specifically pass the Source_Typ parameter. Is
@@ -9360,6 +9468,10 @@ package body Sem_Ch3 is
              Defining_Identifier => Derived_Type,
              Subtype_Indication  => New_Indic));
 
+         --  Keep the aspects from the original node
+
+         Move_Aspects (Original_Node (N), N);
+
          Analyze (N);
 
          --  Derivation of subprograms must be delayed until the full subtype
@@ -9494,9 +9606,15 @@ package body Sem_Ch3 is
 
       --  AI-419: Limitedness is not inherited from an interface parent, so to
       --  be limited in that case the type must be explicitly declared as
-      --  limited. However, task and protected interfaces are always limited.
+      --  limited, or synchronized. While task and protected interfaces are
+      --  always limited, a synchronized private extension might not inherit
+      --  from such interfaces, and so we also need to recognize the
+      --  explicit limitedness implied by a synchronized private extension
+      --  that does not derive from a synchronized interface (see RM-7.3(6/2)).
 
-      if Limited_Present (Type_Def) then
+      if Limited_Present (Type_Def)
+        or else Synchronized_Present (Type_Def)
+      then
          Set_Is_Limited_Record (Derived_Type);
 
       elsif Is_Limited_Record (Parent_Type)
@@ -9929,6 +10047,11 @@ package body Sem_Ch3 is
             Replace_Discriminants (Derived_Type, New_Decl);
          end if;
 
+         --  Relocate the aspects from the original type
+
+         Remove_Aspects (New_Decl);
+         Move_Aspects (N, New_Decl);
+
          --  Insert the new derived type declaration
 
          Rewrite (N, New_Decl);
@@ -10232,7 +10355,7 @@ package body Sem_Ch3 is
       --  If not already set, initialize the derived type's list of primitive
       --  operations to an empty element list.
 
-      if not Present (Direct_Primitive_Operations (Derived_Type)) then
+      if No (Direct_Primitive_Operations (Derived_Type)) then
          Set_Direct_Primitive_Operations (Derived_Type, New_Elmt_List);
 
          --  If Etype of the derived type is the base type (as opposed to
@@ -10242,8 +10365,7 @@ package body Sem_Ch3 is
          --  between the two.
 
          if Etype (Derived_Type) = Base_Type (Derived_Type)
-           and then
-             not Present (Direct_Primitive_Operations (Etype (Derived_Type)))
+           and then No (Direct_Primitive_Operations (Etype (Derived_Type)))
          then
             Set_Direct_Primitive_Operations
               (Etype (Derived_Type),
@@ -11514,7 +11636,7 @@ package body Sem_Ch3 is
       --  or else be a partial view.
 
       if Nkind (Discriminant_Type (D)) = N_Access_Definition then
-         if Is_Limited_View (Current_Scope)
+         if Is_Inherently_Limited_Type (Current_Scope)
            or else
              (Nkind (Parent (Current_Scope)) = N_Private_Type_Declaration
                and then Limited_Present (Parent (Current_Scope)))
@@ -13696,7 +13818,7 @@ package body Sem_Ch3 is
       Suffix      : Character)
    is
       C                     : constant Node_Id := Constraint (SI);
-      Number_Of_Constraints : Nat := 0;
+      Number_Of_Constraints : constant Nat := List_Length (Constraints (C));
       Index                 : Node_Id;
       S, T                  : Entity_Id;
       Constraint_OK         : Boolean := True;
@@ -13722,12 +13844,6 @@ package body Sem_Ch3 is
          Constraint_OK := False;
 
       else
-         S := First (Constraints (C));
-         while Present (S) loop
-            Number_Of_Constraints := Number_Of_Constraints + 1;
-            Next (S);
-         end loop;
-
          --  In either case, the index constraint must provide a discrete
          --  range for each index of the array type and the type of each
          --  discrete range must be the same as that of the corresponding

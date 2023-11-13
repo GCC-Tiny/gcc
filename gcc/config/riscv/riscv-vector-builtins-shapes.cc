@@ -49,6 +49,7 @@ build_one (function_builder &b, const function_group_info &group,
     group.ops_infos.types[vec_type_idx].index);
   b.allocate_argument_types (function_instance, argument_types);
   b.apply_predication (function_instance, return_type, argument_types);
+  b.add_overloaded_function (function_instance, *group.shape);
   b.add_unique_function (function_instance, (*group.shape), return_type,
 			 argument_types);
 }
@@ -316,6 +317,82 @@ struct widen_alu_frm_def : public build_frm_base
     /* vop<sew>_<op> --> vop<sew>_<op>_<type>.  */
     if (!overloaded_p)
       b.append_name (type_suffixes[instance.type.index].vector);
+
+    /* According to rvv-intrinsic-doc, it does not add "_rm" suffix
+       for vop_rm C++ overloaded API.  */
+    if (!overloaded_p)
+      b.append_name ("_rm");
+
+    /* According to rvv-intrinsic-doc, it does not add "_m" suffix
+       for vop_m C++ overloaded API.  */
+    if (overloaded_p && instance.pred == PRED_TYPE_m)
+      return b.finish_name ();
+
+    b.append_name (predication_suffixes[instance.pred]);
+
+    return b.finish_name ();
+  }
+};
+
+/* narrow_alu_frm_def class.  */
+struct narrow_alu_frm_def : public build_frm_base
+{
+  char *get_name (function_builder &b, const function_instance &instance,
+		  bool overloaded_p) const override
+  {
+    char base_name[BASE_NAME_MAX_LEN] = {};
+
+    normalize_base_name (base_name, instance.base_name, sizeof (base_name));
+
+    b.append_base_name (base_name);
+
+    if (!overloaded_p)
+      {
+	/* vop --> vop_<op>.  */
+	b.append_name (operand_suffixes[instance.op_info->op]);
+	/* vop_<op> --> vop_<op>_<type>.  */
+	vector_type_index ret_type_idx
+	  = instance.op_info->ret.get_function_type_index (instance.type.index);
+	b.append_name (type_suffixes[ret_type_idx].vector);
+      }
+
+    /* According to rvv-intrinsic-doc, it does not add "_rm" suffix
+       for vop_rm C++ overloaded API.  */
+    if (!overloaded_p)
+      b.append_name ("_rm");
+
+    /* According to rvv-intrinsic-doc, it does not add "_m" suffix
+       for vop_m C++ overloaded API.  */
+    if (overloaded_p && instance.pred == PRED_TYPE_m)
+      return b.finish_name ();
+
+    b.append_name (predication_suffixes[instance.pred]);
+
+    return b.finish_name ();
+  }
+};
+
+/* reduc_alu_frm_def class.  */
+struct reduc_alu_frm_def : public build_frm_base
+{
+  char *get_name (function_builder &b, const function_instance &instance,
+		  bool overloaded_p) const override
+  {
+    char base_name[BASE_NAME_MAX_LEN] = {};
+
+    normalize_base_name (base_name, instance.base_name, sizeof (base_name));
+
+    b.append_base_name (base_name);
+
+    /* vop_<op> --> vop<sew>_<op>_<type>.  */
+    if (!overloaded_p)
+      {
+	b.append_name (operand_suffixes[instance.op_info->op]);
+	b.append_name (type_suffixes[instance.type.index].vector);
+	vector_type_index ret_type_idx
+	  = instance.op_info->ret.get_function_type_index (instance.type.index);
+	b.append_name (type_suffixes[ret_type_idx].vector);
+      }
 
     /* According to rvv-intrinsic-doc, it does not add "_rm" suffix
        for vop_rm C++ overloaded API.  */
@@ -630,6 +707,68 @@ struct vget_def : public misc_def
   }
 };
 
+/* vcreate_def class.  */
+struct vcreate_def : public build_base
+{
+  void build (function_builder &b,
+	      const function_group_info &group) const override
+  {
+    for (unsigned int vec_type_idx = 0;
+	 group.ops_infos.types[vec_type_idx].index != NUM_VECTOR_TYPES;
+	 ++vec_type_idx)
+      {
+	  auto_vec<tree, 8> argument_types;
+	  function_instance function_instance (group.base_name, *group.base,
+					      *group.shape,
+					      group.ops_infos.types[vec_type_idx],
+					      group.preds[0], &group.ops_infos);
+
+	  tree return_type = group.ops_infos.ret.get_tree_type (
+	    group.ops_infos.types[vec_type_idx].index);
+
+	  if (!return_type)
+	    continue;
+
+	  tree arg_type = function_instance.op_info->args[0].get_tree_type (
+	    function_instance.type.index);
+
+	  machine_mode outer_mode = TYPE_MODE (return_type);
+	  machine_mode inner_mode = TYPE_MODE (arg_type);
+	  unsigned int nargs
+	    = exact_div (GET_MODE_SIZE (outer_mode), GET_MODE_SIZE (inner_mode))
+		.to_constant ();
+
+	  for (unsigned int i = 0; i < nargs; i++)
+	    argument_types.quick_push (arg_type);
+
+	  b.add_unique_function (function_instance, (*group.shape), return_type,
+	    argument_types);
+     }
+  }
+
+  char *get_name (function_builder &b, const function_instance &instance,
+		  bool overloaded_p) const override
+  {
+    if (overloaded_p)
+      return nullptr;
+    b.append_base_name (instance.base_name);
+    b.append_name (operand_suffixes[instance.op_info->op]);
+
+    if (instance.op_info->ret.base_type != RVV_BASE_vector)
+      {
+	vector_type_index arg_type_idx
+	  = instance.op_info->args[0].get_function_type_index (
+	    instance.type.index);
+	b.append_name (type_suffixes[arg_type_idx].vector);
+      }
+
+    vector_type_index ret_type_idx
+      = instance.op_info->ret.get_function_type_index (instance.type.index);
+    b.append_name (type_suffixes[ret_type_idx].vector);
+    return b.finish_name ();
+  }
+};
+
 /* read_vl_def class.  */
 struct read_vl_def : public function_shape
 {
@@ -856,14 +995,17 @@ SHAPE(widen_alu_frm, widen_alu_frm)
 SHAPE(no_mask_policy, no_mask_policy)
 SHAPE(return_mask, return_mask)
 SHAPE(narrow_alu, narrow_alu)
+SHAPE(narrow_alu_frm, narrow_alu_frm)
 SHAPE(move, move)
 SHAPE(mask_alu, mask_alu)
 SHAPE(reduc_alu, reduc_alu)
+SHAPE(reduc_alu_frm, reduc_alu_frm)
 SHAPE(scalar_move, scalar_move)
 SHAPE(vundefined, vundefined)
 SHAPE(misc, misc)
 SHAPE(vset, vset)
 SHAPE(vget, vget)
+SHAPE(vcreate, vcreate)
 SHAPE(read_vl, read_vl)
 SHAPE(fault_load, fault_load)
 SHAPE(vlenb, vlenb)

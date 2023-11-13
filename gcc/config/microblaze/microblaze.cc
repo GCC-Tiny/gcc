@@ -56,7 +56,7 @@
 /* This file should be included last.  */
 #include "target-def.h"
 
-#define MICROBLAZE_VERSION_COMPARE(VA,VB) strcasecmp (VA, VB)
+#define MICROBLAZE_VERSION_COMPARE(VA,VB) strverscmp (VA, VB)
 
 /* Classifies an address.
 
@@ -919,7 +919,8 @@ microblaze_classify_address (struct microblaze_address_info *info, rtx x,
    is called during reload.  */
 
 bool
-microblaze_legitimate_address_p (machine_mode mode, rtx x, bool strict)
+microblaze_legitimate_address_p (machine_mode mode, rtx x, bool strict,
+				 code_helper)
 {
   struct microblaze_address_info addr;
 

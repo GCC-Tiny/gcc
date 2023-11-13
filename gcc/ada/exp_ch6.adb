@@ -4352,13 +4352,23 @@ package body Exp_Ch6 is
                --  Generate the accessibility level based on the expression in
                --  the constant's declaration.
 
-               Add_Extra_Actual
-                 (Expr => Accessibility_Level
-                            (Expr            => Expression
-                                                  (Parent (Entity (Prev))),
-                             Level           => Dynamic_Level,
-                             Allow_Alt_Model => False),
-                  EF   => Extra_Accessibility (Formal));
+               declare
+                  Ent : Entity_Id := Entity (Prev);
+
+               begin
+                  --  Handle deferred constants
+
+                  if Present (Full_View (Ent)) then
+                     Ent := Full_View (Ent);
+                  end if;
+
+                  Add_Extra_Actual
+                    (Expr => Accessibility_Level
+                               (Expr            => Expression (Parent (Ent)),
+                                Level           => Dynamic_Level,
+                                Allow_Alt_Model => False),
+                     EF   => Extra_Accessibility (Formal));
+               end;
 
             --  Normal case
 
@@ -4620,7 +4630,7 @@ package body Exp_Ch6 is
             --  It may be possible that we are re-expanding an already
             --  expanded call when are are dealing with dispatching ???
 
-            if not Present (Parameter_Associations (Call_Node))
+            if No (Parameter_Associations (Call_Node))
               or else Nkind (Last (Parameter_Associations (Call_Node)))
                         /= N_Parameter_Association
               or else not Is_Accessibility_Actual
@@ -5424,9 +5434,13 @@ package body Exp_Ch6 is
       --  object, then no need to copy/readjust/finalize, we can initialize it
       --  in place. However, if the call returns on the secondary stack, then
       --  we need the expansion because we'll be renaming the temporary as the
-      --  (permanent) object.
+      --  (permanent) object. We also apply it in the case of the expression of
+      --  a delta aggregate, since it is used only to initialize a temporary.
 
-      if Nkind (Par) = N_Object_Declaration and then not Use_Sec_Stack then
+      if Nkind (Par) in N_Object_Declaration | N_Delta_Aggregate
+        and then Expression (Par) = N
+        and then not Use_Sec_Stack
+      then
          return;
       end if;
 
@@ -5603,7 +5617,7 @@ package body Exp_Ch6 is
       --  with the scope finalizer. There is one flag per each return object
       --  in case of multiple returns.
 
-      if Is_BIP_Func and then Needs_Finalization (Etype (Ret_Obj_Id)) then
+      if Needs_Finalization (Etype (Ret_Obj_Id)) then
          declare
             Flag_Decl : Node_Id;
             Flag_Id   : Entity_Id;
@@ -5702,7 +5716,7 @@ package body Exp_Ch6 is
          --  Update the state of the function right before the object is
          --  returned.
 
-         if Is_BIP_Func and then Needs_Finalization (Etype (Ret_Obj_Id)) then
+         if Needs_Finalization (Etype (Ret_Obj_Id)) then
             declare
                Flag_Id : constant Entity_Id :=
                            Status_Flag_Or_Transient_Decl (Ret_Obj_Id);
@@ -6004,16 +6018,18 @@ package body Exp_Ch6 is
 
       --  If local-exception-to-goto optimization active, insert dummy push
       --  statements at start, and dummy pop statements at end, but inhibit
-      --  this if we have No_Exception_Handlers, since they are useless and
-      --  interfere with analysis, e.g. by CodePeer. We also don't need these
-      --  if we're unnesting subprograms because the only purpose of these
-      --  nodes is to ensure we don't set a label in one subprogram and branch
-      --  to it in another.
+      --  this if we have No_Exception_Handlers or expanding a entry barrier
+      --  function, since they are useless and interfere with analysis (e.g. by
+      --  CodePeer) and other optimizations. We also don't need these if we're
+      --  unnesting subprograms because the only purpose of these nodes is to
+      --  ensure we don't set a label in one subprogram and branch to it in
+      --  another.
 
       if (Debug_Flag_Dot_G
            or else Restriction_Active (No_Exception_Propagation))
         and then not Restriction_Active (No_Exception_Handlers)
         and then not CodePeer_Mode
+        and then not Is_Entry_Barrier_Function (N)
         and then not Unnest_Subprogram_Mode
         and then Is_Non_Empty_List (L)
       then
@@ -6897,7 +6913,7 @@ package body Exp_Ch6 is
             Set_Enclosing_Sec_Stack_Return (N);
          end if;
 
-      elsif Is_Limited_View (R_Type) then
+      elsif Is_Inherently_Limited_Type (R_Type) then
          null;
 
       --  No copy needed for thunks returning interface type objects since
@@ -8203,7 +8219,7 @@ package body Exp_Ch6 is
       --  of a function with a limited interface result, where the function
       --  may return objects of nonlimited descendants.
 
-      return Is_Limited_View (Typ)
+      return Is_Inherently_Limited_Type (Typ)
         and then Ada_Version >= Ada_2005
         and then not Debug_Flag_Dot_L;
    end Is_Build_In_Place_Result_Type;
@@ -10105,6 +10121,7 @@ package body Exp_Ch6 is
                return Skip;
 
             when N_Abstract_Subprogram_Declaration
+               | N_Aspect_Specification
                | N_At_Clause
                | N_Call_Marker
                | N_Empty

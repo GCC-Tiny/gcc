@@ -1708,6 +1708,11 @@ remap_gimple_stmt (gimple *stmt, copy_body_data *id)
 	           (s1, gimple_omp_sections_clauses (stmt));
 	  break;
 
+	case GIMPLE_OMP_STRUCTURED_BLOCK:
+	  s1 = remap_gimple_seq (gimple_omp_body (stmt), id);
+	  copy = gimple_build_omp_structured_block (s1);
+	  break;
+
 	case GIMPLE_OMP_SINGLE:
 	  s1 = remap_gimple_seq (gimple_omp_body (stmt), id);
 	  copy = gimple_build_omp_single
@@ -2610,7 +2615,7 @@ copy_edges_for_bb (basic_block bb, profile_count num, profile_count den,
 	}
       else if (can_throw)
 	{
-	  make_eh_edges (copy_stmt);
+	  make_eh_edge (copy_stmt);
 	  update_probs = true;
 	}
 
@@ -2815,6 +2820,7 @@ initialize_cfun (tree new_fndecl, tree callee_fndecl, profile_count count)
   init_empty_tree_cfg ();
 
   profile_status_for_fn (cfun) = profile_status_for_fn (src_cfun);
+  cfun->cfg->full_profile = src_cfun->cfg->full_profile;
 
   profile_count num = count;
   profile_count den = ENTRY_BLOCK_PTR_FOR_FN (src_cfun)->count;
@@ -3556,7 +3562,11 @@ setup_one_parameter (copy_body_data *id, tree p, tree value, tree fn,
      it.  */
   if (optimize && gimple_in_ssa_p (cfun) && !def && is_gimple_reg (p))
     {
-      gcc_assert (!value || !TREE_SIDE_EFFECTS (value));
+      /* When there's a gross type mismatch between the passed value
+	 and the declared argument type drop it on the floor and do
+	 not bother to insert a debug bind.  */
+      if (value && !is_gimple_reg_type (TREE_TYPE (value)))
+	return NULL;
       return insert_init_debug_bind (id, bb, var, rhs, NULL);
     }
 
@@ -3572,9 +3582,7 @@ setup_one_parameter (copy_body_data *id, tree p, tree value, tree fn,
 
       STRIP_USELESS_TYPE_CONVERSION (rhs);
 
-      /* If we are in SSA form properly remap the default definition
-         or assign to a dummy SSA name if the parameter is unused and
-	 we are not optimizing.  */
+      /* If we are in SSA form properly remap the default definition.  */
       if (gimple_in_ssa_p (cfun) && is_gimple_reg (p))
 	{
 	  if (def)
@@ -3583,11 +3591,6 @@ setup_one_parameter (copy_body_data *id, tree p, tree value, tree fn,
 	      init_stmt = gimple_build_assign (def, rhs);
 	      SSA_NAME_IS_DEFAULT_DEF (def) = 0;
 	      set_ssa_default_def (cfun, var, NULL);
-	    }
-	  else if (!optimize)
-	    {
-	      def = make_ssa_name (var);
-	      init_stmt = gimple_build_assign (def, rhs);
 	    }
 	}
       else if (!is_empty_type (TREE_TYPE (var)))
@@ -3646,6 +3649,23 @@ initialize_inlined_parameters (copy_body_data *id, gimple *stmt,
 		  && TREE_CODE (*defp) == SSA_NAME
 		  && SSA_NAME_VAR (*defp) == var)
 		TREE_TYPE (*defp) = TREE_TYPE (var);
+	    }
+	  /* When not optimizing and the parameter is unused, assign to
+	     a dummy SSA name.  Do this after remapping the type above.  */
+	  else if (!optimize
+		   && is_gimple_reg (p)
+		   && i < gimple_call_num_args (stmt))
+	    {
+	      tree val = gimple_call_arg (stmt, i);
+	      if (val != error_mark_node)
+		{
+		  if (!useless_type_conversion_p (TREE_TYPE (p),
+						  TREE_TYPE (val)))
+		    val = force_value_to_type (TREE_TYPE (p), val);
+		  def = make_ssa_name (var);
+		  gimple *init_stmt = gimple_build_assign (def, val);
+		  insert_init_stmt (id, bb, init_stmt);
+		}
 	    }
 	}
     }
@@ -4561,6 +4581,7 @@ estimate_num_insns (gimple *stmt, eni_weights *weights)
     case GIMPLE_OMP_SCAN:
     case GIMPLE_OMP_SECTION:
     case GIMPLE_OMP_SECTIONS:
+    case GIMPLE_OMP_STRUCTURED_BLOCK:
     case GIMPLE_OMP_SINGLE:
     case GIMPLE_OMP_TARGET:
     case GIMPLE_OMP_TEAMS:
@@ -4953,6 +4974,7 @@ expand_call_inline (basic_block bb, gimple *stmt, copy_body_data *id,
   id->src_cfun = DECL_STRUCT_FUNCTION (fn);
   id->reset_location = DECL_IGNORED_P (fn);
   id->call_stmt = call_stmt;
+  cfun->cfg->full_profile &= id->src_cfun->cfg->full_profile;
 
   /* When inlining into an OpenMP SIMD-on-SIMT loop, arrange for new automatic
      variables to be added to IFN_GOMP_SIMT_ENTER argument list.  */

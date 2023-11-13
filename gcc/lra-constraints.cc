@@ -344,7 +344,8 @@ valid_address_p (machine_mode mode ATTRIBUTE_UNUSED,
  win:
   return true;
 #else
-  return targetm.addr_space.legitimate_address_p (mode, addr, 0, as);
+  return targetm.addr_space.legitimate_address_p (mode, addr, 0, as,
+						  ERROR_MARK);
 #endif
 }
 
@@ -1461,10 +1462,15 @@ static int goal_alt_matches[MAX_RECOG_OPERANDS];
 static int goal_alt_dont_inherit_ops_num;
 /* Numbers of operands whose reload pseudos should not be inherited.  */
 static int goal_alt_dont_inherit_ops[MAX_RECOG_OPERANDS];
+/* True if we should try only this alternative for the next constraint sub-pass
+   to speed up the sub-pass.  */
+static bool goal_reuse_alt_p;
 /* True if the insn commutative operands should be swapped.  */
 static bool goal_alt_swapped;
 /* The chosen insn alternative.	 */
 static int goal_alt_number;
+/* True if output reload of the stack pointer should be generated.  */
+static bool goal_alt_out_sp_reload_p;
 
 /* True if the corresponding operand is the result of an equivalence
    substitution.  */
@@ -2127,6 +2133,10 @@ process_alt_operands (int only_alternative)
   int curr_alt_dont_inherit_ops_num;
   /* Numbers of operands whose reload pseudos should not be inherited.	*/
   int curr_alt_dont_inherit_ops[MAX_RECOG_OPERANDS];
+  bool curr_reuse_alt_p;
+  /* True if output stack pointer reload should be generated for the current
+     alternative.  */
+  bool curr_alt_out_sp_reload_p;
   rtx op;
   /* The register when the operand is a subreg of register, otherwise the
      operand itself.  */
@@ -2210,7 +2220,9 @@ process_alt_operands (int only_alternative)
 	}
       reject += static_reject;
       early_clobbered_regs_num = 0;
-
+      curr_alt_out_sp_reload_p = false;
+      curr_reuse_alt_p = true;
+      
       for (nop = 0; nop < n_operands; nop++)
 	{
 	  const char *p;
@@ -2567,7 +2579,10 @@ process_alt_operands (int only_alternative)
 		      if (satisfies_memory_constraint_p (op, cn))
 			win = true;
 		      else if (spilled_pseudo_p (op))
-			win = true;
+			{
+			  curr_reuse_alt_p = false;
+			  win = true;
+			}
 		      break;
 		    }
 		  break;
@@ -2594,12 +2609,15 @@ process_alt_operands (int only_alternative)
 		  winreg = true;
 		  if (REG_P (op))
 		    {
+		      tree decl;
 		      if (hard_regno[nop] >= 0
 			  && in_hard_reg_set_p (this_alternative_set,
 						mode, hard_regno[nop])
-			  && !TEST_HARD_REG_BIT
-			      (this_alternative_exclude_start_hard_regs,
-			       hard_regno[nop]))
+			  && ((REG_ATTRS (op) && (decl = REG_EXPR (op)) != NULL
+			       && VAR_P (decl) && DECL_HARD_REGISTER (decl))
+			      || !(TEST_HARD_REG_BIT
+				   (this_alternative_exclude_start_hard_regs,
+				    hard_regno[nop]))))
 			win = true;
 		      else if (hard_regno[nop] < 0
 			       && in_class_p (op, this_alternative, NULL))
@@ -2681,12 +2699,10 @@ process_alt_operands (int only_alternative)
 	      bool no_regs_p;
 
 	      reject += op_reject;
-	      /* Never do output reload of stack pointer.  It makes
-		 impossible to do elimination when SP is changed in
-		 RTL.  */
-	      if (op == stack_pointer_rtx && ! frame_pointer_needed
+	      /* Mark output reload of the stack pointer.  */
+	      if (op == stack_pointer_rtx
 		  && curr_static_id->operand[nop].type != OP_IN)
-		goto fail;
+		curr_alt_out_sp_reload_p = true;
 
 	      /* If this alternative asks for a specific reg class, see if there
 		 is at least one allocatable register in that class.  */
@@ -3313,9 +3329,11 @@ process_alt_operands (int only_alternative)
 	      goal_alt_offmemok[nop] = curr_alt_offmemok[nop];
 	    }
 	  goal_alt_dont_inherit_ops_num = curr_alt_dont_inherit_ops_num;
+	  goal_reuse_alt_p = curr_reuse_alt_p;
 	  for (nop = 0; nop < curr_alt_dont_inherit_ops_num; nop++)
 	    goal_alt_dont_inherit_ops[nop] = curr_alt_dont_inherit_ops[nop];
 	  goal_alt_swapped = curr_swapped;
+	  goal_alt_out_sp_reload_p = curr_alt_out_sp_reload_p;
 	  best_overall = overall;
 	  best_losers = losers;
 	  best_reload_nregs = reload_nregs;
@@ -3384,12 +3402,12 @@ base_plus_disp_to_reg (struct address_info *ad, rtx disp)
 /* Make reload of index part of address AD.  Return the new
    pseudo.  */
 static rtx
-index_part_to_reg (struct address_info *ad)
+index_part_to_reg (struct address_info *ad, enum reg_class index_class)
 {
   rtx new_reg;
 
   new_reg = lra_create_new_reg (GET_MODE (*ad->index), NULL_RTX,
-				INDEX_REG_CLASS, NULL, "index term");
+				index_class, NULL, "index term");
   expand_mult (GET_MODE (*ad->index), *ad->index_term,
 	       GEN_INT (get_index_scale (ad)), new_reg, 1);
   return new_reg;
@@ -3644,13 +3662,14 @@ process_address_1 (int nop, bool check_only_p,
   /* If INDEX_REG_CLASS is assigned to base_term already and isn't to
      index_term, swap them so to avoid assigning INDEX_REG_CLASS to both
      when INDEX_REG_CLASS is a single register class.  */
+  enum reg_class index_cl = index_reg_class (curr_insn);
   if (ad.base_term != NULL
       && ad.index_term != NULL
-      && ira_class_hard_regs_num[INDEX_REG_CLASS] == 1
+      && ira_class_hard_regs_num[index_cl] == 1
       && REG_P (*ad.base_term)
       && REG_P (*ad.index_term)
-      && in_class_p (*ad.base_term, INDEX_REG_CLASS, NULL)
-      && ! in_class_p (*ad.index_term, INDEX_REG_CLASS, NULL))
+      && in_class_p (*ad.base_term, index_cl, NULL)
+      && ! in_class_p (*ad.index_term, index_cl, NULL))
     {
       std::swap (ad.base, ad.index);
       std::swap (ad.base_term, ad.index_term);
@@ -3666,7 +3685,7 @@ process_address_1 (int nop, bool check_only_p,
 				     REGNO (*ad.base_term)) != NULL_RTX)
 	    ? after : NULL),
 	   base_reg_class (ad.mode, ad.as, ad.base_outer_code,
-			   get_index_code (&ad)))))
+			   get_index_code (&ad), curr_insn))))
     {
       change_p = true;
       if (ad.base_term2 != NULL)
@@ -3674,7 +3693,7 @@ process_address_1 (int nop, bool check_only_p,
     }
   if (ad.index_term != NULL
       && process_addr_reg (ad.index_term, check_only_p,
-			   before, NULL, INDEX_REG_CLASS))
+			   before, NULL, index_cl))
     change_p = true;
 
   /* Target hooks sometimes don't treat extra-constraint addresses as
@@ -3716,7 +3735,8 @@ process_address_1 (int nop, bool check_only_p,
 	  rtx_insn *last = get_last_insn ();
 	  int code = -1;
 	  enum reg_class cl = base_reg_class (ad.mode, ad.as,
-					      SCRATCH, SCRATCH);
+					      SCRATCH, SCRATCH,
+					      curr_insn);
 	  rtx addr = *ad.inner;
 
 	  new_reg = lra_create_new_reg (Pmode, NULL_RTX, cl, NULL, "addr");
@@ -3779,9 +3799,10 @@ process_address_1 (int nop, bool check_only_p,
 	  /* index * scale + disp => new base + index * scale,
 	     case (1) above.  */
 	  enum reg_class cl = base_reg_class (ad.mode, ad.as, PLUS,
-					      GET_CODE (*ad.index));
+					      GET_CODE (*ad.index),
+					      curr_insn);
 
-	  lra_assert (INDEX_REG_CLASS != NO_REGS);
+	  lra_assert (index_cl != NO_REGS);
 	  new_reg = lra_create_new_reg (Pmode, NULL_RTX, cl, NULL, "disp");
 	  lra_emit_move (new_reg, *ad.disp);
 	  *ad.inner = simplify_gen_binary (PLUS, GET_MODE (new_reg),
@@ -3840,7 +3861,7 @@ process_address_1 (int nop, bool check_only_p,
 	      *ad.base_term = XEXP (SET_SRC (set), 0);
 	      *ad.disp_term = XEXP (SET_SRC (set), 1);
 	      cl = base_reg_class (ad.mode, ad.as, ad.base_outer_code,
-				   get_index_code (&ad));
+				   get_index_code (&ad), curr_insn);
 	      regno = REGNO (*ad.base_term);
 	      if (regno >= FIRST_PSEUDO_REGISTER
 		  && cl != lra_get_allocno_class (regno))
@@ -3877,14 +3898,15 @@ process_address_1 (int nop, bool check_only_p,
       changed pseudo on the equivalent memory and a subreg of the
       pseudo onto the memory of different mode for which the scale is
       prohibitted.  */
-      new_reg = index_part_to_reg (&ad);
+      new_reg = index_part_to_reg (&ad, index_cl);
       *ad.inner = simplify_gen_binary (PLUS, GET_MODE (new_reg),
 				       *ad.base_term, new_reg);
     }
   else
     {
       enum reg_class cl = base_reg_class (ad.mode, ad.as,
-					  SCRATCH, SCRATCH);
+					  SCRATCH, SCRATCH,
+					  curr_insn);
       rtx addr = *ad.inner;
       
       new_reg = lra_create_new_reg (Pmode, NULL_RTX, cl, NULL, "addr");
@@ -4393,7 +4415,8 @@ curr_insn_transform (bool check_only_p)
     }
 
   lra_assert (goal_alt_number >= 0);
-  lra_set_used_insn_alternative (curr_insn, goal_alt_number);
+  lra_set_used_insn_alternative (curr_insn, goal_reuse_alt_p
+				 ? goal_alt_number : LRA_UNKNOWN_ALT);
 
   if (lra_dump_file != NULL)
     {
@@ -4633,7 +4656,7 @@ curr_insn_transform (bool check_only_p)
 
 	  push_to_sequence (before);
 	  rclass = base_reg_class (GET_MODE (op), MEM_ADDR_SPACE (op),
-				   MEM, SCRATCH);
+				   MEM, SCRATCH, curr_insn);
 	  if (GET_RTX_CLASS (code) == RTX_AUTOINC)
 	    new_reg = emit_inc (rclass, *loc, *loc,
 				/* This value does not matter for MODIFY.  */
@@ -4833,6 +4856,28 @@ curr_insn_transform (bool check_only_p)
 	  && ++curr_id->asm_reloads_num >= FIRST_PSEUDO_REGISTER)
 	/* Most probably there are no enough registers to satisfy asm insn: */
 	lra_asm_insn_error (curr_insn);
+    }
+  if (goal_alt_out_sp_reload_p)
+    {
+      /* We have an output stack pointer reload -- update sp offset: */
+      rtx set;
+      bool done_p = false;
+      poly_int64 sp_offset = curr_id->sp_offset;
+      for (rtx_insn *insn = after; insn != NULL_RTX; insn = NEXT_INSN (insn))
+	if ((set = single_set (insn)) != NULL_RTX
+	    && SET_DEST (set) == stack_pointer_rtx)
+	  {
+	    lra_assert (!done_p);
+	    done_p = true;
+	    curr_id->sp_offset = 0;
+	    lra_insn_recog_data_t id = lra_get_insn_recog_data (insn);
+	    id->sp_offset = sp_offset;
+	    if (lra_dump_file != NULL)
+	      fprintf (lra_dump_file,
+		       "            Moving sp offset from insn %u to %u\n",
+		       INSN_UID (curr_insn), INSN_UID (insn));
+	  }
+      lra_assert (done_p);
     }
   lra_process_new_insns (curr_insn, before, after, "Inserting insn reload");
   return change_p;
@@ -5386,6 +5431,11 @@ lra_constraints (bool first_p)
 					   loc_equivalence_callback, curr_insn);
 	      if (old != *curr_id->operand_loc[0])
 		{
+		  /* If we substitute pseudo by shared equivalence, we can fail
+		     to update LRA reg info and this can result in many
+		     unexpected consequences.  So keep rtl unshared:  */
+		  *curr_id->operand_loc[0]
+		    = copy_rtx (*curr_id->operand_loc[0]);
 		  lra_update_insn_regno_info (curr_insn);
 		  changed_p = true;
 		}

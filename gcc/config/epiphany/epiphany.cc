@@ -2053,7 +2053,8 @@ epiphany_adjust_cost (rtx_insn *insn, int dep_type, rtx_insn *dep_insn,
      || RTX_OK_FOR_OFFSET_P (MODE, XEXP (X, 1))))
 
 static bool
-epiphany_legitimate_address_p (machine_mode mode, rtx x, bool strict)
+epiphany_legitimate_address_p (machine_mode mode, rtx x, bool strict,
+			       code_helper = ERROR_MARK)
 {
 #define REG_OK_FOR_BASE_P(X) \
   (strict ? GPR_P (REGNO (X)) : GPR_AP_OR_PSEUDO_P (REGNO (X)))
@@ -2399,7 +2400,7 @@ epiphany_mode_priority (int entity, int priority)
 }
 
 int
-epiphany_mode_needed (int entity, rtx_insn *insn)
+epiphany_mode_needed (int entity, rtx_insn *insn, HARD_REG_SET)
 {
   enum attr_fp_mode mode;
 
@@ -2436,7 +2437,7 @@ epiphany_mode_needed (int entity, rtx_insn *insn)
     return 2;
   case EPIPHANY_MSW_ENTITY_ROUND_KNOWN:
     if (recog_memoized (insn) == CODE_FOR_set_fp_mode)
-      mode = (enum attr_fp_mode) epiphany_mode_after (entity, mode, insn);
+      mode = (enum attr_fp_mode) epiphany_mode_after (entity, mode, insn, {});
     /* Fall through.  */
   case EPIPHANY_MSW_ENTITY_NEAREST:
   case EPIPHANY_MSW_ENTITY_TRUNC:
@@ -2497,7 +2498,8 @@ epiphany_mode_entry_exit (int entity, bool exit)
 }
 
 int
-epiphany_mode_after (int entity, int last_mode, rtx_insn *insn)
+epiphany_mode_after (int entity, int last_mode, rtx_insn *insn,
+		     HARD_REG_SET)
 {
   /* We have too few call-saved registers to hope to keep the masks across
      calls.  */

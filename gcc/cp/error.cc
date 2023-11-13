@@ -1510,10 +1510,6 @@ dump_decl (cxx_pretty_printer *pp, tree t, int flags)
       dump_decl (pp, BASELINK_FUNCTIONS (t), flags);
       break;
 
-    case NON_DEPENDENT_EXPR:
-      dump_expr (pp, t, flags);
-      break;
-
     case TEMPLATE_TYPE_PARM:
       if (flags & TFF_DECL_SPECIFIERS)
 	pp->declaration (t);
@@ -2942,10 +2938,6 @@ dump_expr (cxx_pretty_printer *pp, tree t, int flags)
       pp_cxx_right_paren (pp);
       break;
 
-    case NON_DEPENDENT_EXPR:
-      dump_expr (pp, TREE_OPERAND (t, 0), flags);
-      break;
-
     case ARGUMENT_PACK_SELECT:
       dump_template_argument (pp, ARGUMENT_PACK_SELECT_FROM_PACK (t), flags);
       break;
@@ -3644,7 +3636,7 @@ cp_print_error_function (diagnostic_context *context,
 		  pp_newline (context->printer);
 		  if (s.file != NULL)
 		    {
-		      if (context->show_column && s.column != 0)
+		      if (context->m_show_column && s.column != 0)
 			pp_printf (context->printer,
 				   _("    inlined from %qD at %r%s:%d:%d%R"),
 				   fndecl,
@@ -3745,7 +3737,7 @@ print_instantiation_partial_context_line (diagnostic_context *context,
 
   expanded_location xloc = expand_location (loc);
 
-  if (context->show_column)
+  if (context->m_show_column)
     pp_verbatim (context->printer, _("%r%s:%d:%d:%R   "),
 		 "locus", xloc.file, xloc.line, xloc.column);
   else
@@ -3774,6 +3766,8 @@ print_instantiation_partial_context_line (diagnostic_context *context,
 		   ? _("recursively required from here\n")
 		   : _("required from here\n"));
     }
+  gcc_rich_location rich_loc (loc);
+  diagnostic_show_locus (context, &rich_loc, DK_NOTE);
 }
 
 /* Same as print_instantiation_full_context but less verbose.  */
@@ -3822,7 +3816,7 @@ print_instantiation_partial_context (diagnostic_context *context,
 	{
 	  expanded_location xloc;
 	  xloc = expand_location (loc);
-	  if (context->show_column)
+	  if (context->m_show_column)
 	    pp_verbatim (context->printer,
 			 _("%r%s:%d:%d:%R   [ skipping %d instantiation "
 			   "contexts, use -ftemplate-backtrace-limit=0 to "
@@ -3882,7 +3876,7 @@ maybe_print_constexpr_context (diagnostic_context *context)
     {
       expanded_location xloc = expand_location (EXPR_LOCATION (t));
       const char *s = expr_as_string (t, 0);
-      if (context->show_column)
+      if (context->m_show_column)
 	pp_verbatim (context->printer,
 		     _("%r%s:%d:%d:%R   in %<constexpr%> expansion of %qs"),
 		     "locus", xloc.file, xloc.line, xloc.column, s);
@@ -3899,7 +3893,7 @@ static void
 print_location (diagnostic_context *context, location_t loc)
 {
   expanded_location xloc = expand_location (loc);
-  if (context->show_column)
+  if (context->m_show_column)
     pp_verbatim (context->printer, _("%r%s:%d:%d:%R   "),
                  "locus", xloc.file, xloc.line, xloc.column);
   else
@@ -4454,10 +4448,10 @@ cp_printer (pretty_printer *pp, text_info *text, const char *spec,
 
   const char *result;
   tree t = NULL;
-#define next_tree    (t = va_arg (*text->args_ptr, tree))
-#define next_tcode   ((enum tree_code) va_arg (*text->args_ptr, int))
-#define next_lang    ((enum languages) va_arg (*text->args_ptr, int))
-#define next_int     va_arg (*text->args_ptr, int)
+#define next_tree    (t = va_arg (*text->m_args_ptr, tree))
+#define next_tcode   ((enum tree_code) va_arg (*text->m_args_ptr, int))
+#define next_lang    ((enum languages) va_arg (*text->m_args_ptr, int))
+#define next_int     va_arg (*text->m_args_ptr, int)
 
   if (precision != 0 || wide)
     return false;

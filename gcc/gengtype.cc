@@ -5200,8 +5200,8 @@ main (int argc, char **argv)
   this_file = input_file_by_name (__FILE__);
   system_h_file = input_file_by_name ("system.h");
   /* Set the scalar_is_char union number for predefined scalar types.  */
-  scalar_nonchar.u.scalar_is_char = FALSE;
-  scalar_char.u.scalar_is_char = TRUE;
+  scalar_nonchar.u.scalar_is_char = false;
+  scalar_char.u.scalar_is_char = true;
 
   parse_program_options (argc, argv);
 
@@ -5234,9 +5234,7 @@ main (int argc, char **argv)
       POS_HERE (do_scalar_typedef ("REAL_VALUE_TYPE", &pos));
       POS_HERE (do_scalar_typedef ("FIXED_VALUE_TYPE", &pos));
       POS_HERE (do_scalar_typedef ("double_int", &pos));
-      POS_HERE (do_scalar_typedef ("poly_int64_pod", &pos));
       POS_HERE (do_scalar_typedef ("offset_int", &pos));
-      POS_HERE (do_scalar_typedef ("widest_int", &pos));
       POS_HERE (do_scalar_typedef ("int64_t", &pos));
       POS_HERE (do_scalar_typedef ("poly_int64", &pos));
       POS_HERE (do_scalar_typedef ("poly_uint64", &pos));

@@ -90,12 +90,14 @@ static bool require_constant_elements;
 static bool require_constexpr_value;
 
 static tree qualify_type (tree, tree);
-static int tagged_types_tu_compatible_p (const_tree, const_tree, bool *,
-					 bool *);
-static int comp_target_types (location_t, tree, tree);
-static int function_types_compatible_p (const_tree, const_tree, bool *,
-					bool *);
-static int type_lists_compatible_p (const_tree, const_tree, bool *, bool *);
+struct comptypes_data;
+static bool tagged_types_tu_compatible_p (const_tree, const_tree,
+					  struct comptypes_data *);
+static bool comp_target_types (location_t, tree, tree);
+static bool function_types_compatible_p (const_tree, const_tree,
+					 struct comptypes_data *);
+static bool type_lists_compatible_p (const_tree, const_tree,
+				     struct comptypes_data *);
 static tree lookup_field (tree, tree);
 static int convert_arguments (location_t, vec<location_t>, tree,
 			      vec<tree, va_gc> *, vec<tree, va_gc> *, tree,
@@ -125,7 +127,8 @@ static tree find_init_member (tree, struct obstack *);
 static void readonly_warning (tree, enum lvalue_use);
 static int lvalue_or_else (location_t, const_tree, enum lvalue_use);
 static void record_maybe_used_decl (tree);
-static int comptypes_internal (const_tree, const_tree, bool *, bool *);
+static bool comptypes_internal (const_tree, const_tree,
+				struct comptypes_data *data);
 
 /* Return true if EXP is a null pointer constant, false otherwise.  */
 
@@ -187,19 +190,13 @@ remove_c_maybe_const_expr (tree expr)
     return expr;
 }
 
-/* This is a cache to hold if two types are compatible or not.  */
+/* This is a cache to hold if two types are seen.  */
 
 struct tagged_tu_seen_cache {
   const struct tagged_tu_seen_cache * next;
   const_tree t1;
   const_tree t2;
-  /* The return value of tagged_types_tu_compatible_p if we had seen
-     these two types already.  */
-  int val;
 };
-
-static const struct tagged_tu_seen_cache * tagged_tu_seen_base;
-static void free_all_tagged_tu_seen_up_to (const struct tagged_tu_seen_cache *);
 
 /* Do `exp = require_complete_type (loc, exp);' to make sure exp
    does not have an incomplete type.  (That includes void types.)
@@ -413,10 +410,12 @@ composite_type (tree t1, tree t2)
      the composite type.  */
 
   if (code1 == ENUMERAL_TYPE
-      && (code2 == INTEGER_TYPE || code2 == BOOLEAN_TYPE))
+      && (code2 == INTEGER_TYPE
+	  || code2 == BOOLEAN_TYPE))
     return t1;
   if (code2 == ENUMERAL_TYPE
-      && (code1 == INTEGER_TYPE || code1 == BOOLEAN_TYPE))
+      && (code1 == INTEGER_TYPE
+	  || code1 == BOOLEAN_TYPE))
     return t2;
 
   gcc_assert (code1 == code2);
@@ -651,7 +650,7 @@ composite_type (tree t1, tree t2)
    possibly differently qualified versions of compatible types.
 
    We assume that comp_target_types has already been done and returned
-   nonzero; if that isn't so, this may crash.  */
+   true; if that isn't so, this may crash.  */
 
 static tree
 common_pointer_type (tree t1, tree t2)
@@ -705,7 +704,7 @@ common_pointer_type (tree t1, tree t2)
 
   /* If the two named address spaces are different, determine the common
      superset address space.  This is guaranteed to exist due to the
-     assumption that comp_target_type returned non-zero.  */
+     assumption that comp_target_type returned true.  */
   as1 = TYPE_ADDR_SPACE (pointed_to_1);
   as2 = TYPE_ADDR_SPACE (pointed_to_2);
   if (!addr_space_superset (as1, as2, &as_common))
@@ -764,10 +763,10 @@ c_common_type (tree t1, tree t2)
 
   gcc_assert (code1 == VECTOR_TYPE || code1 == COMPLEX_TYPE
 	      || code1 == FIXED_POINT_TYPE || code1 == REAL_TYPE
-	      || code1 == INTEGER_TYPE);
+	      || code1 == INTEGER_TYPE || code1 == BITINT_TYPE);
   gcc_assert (code2 == VECTOR_TYPE || code2 == COMPLEX_TYPE
 	      || code2 == FIXED_POINT_TYPE || code2 == REAL_TYPE
-	      || code2 == INTEGER_TYPE);
+	      || code2 == INTEGER_TYPE || code2 == BITINT_TYPE);
 
   /* When one operand is a decimal float type, the other operand cannot be
      a generic float type or a complex type.  We also disallow vector types
@@ -815,6 +814,12 @@ c_common_type (tree t1, tree t2)
 	return t1;
       else if (code2 == COMPLEX_TYPE && TREE_TYPE (t2) == subtype)
 	return t2;
+      else if (TREE_CODE (subtype) == BITINT_TYPE)
+	{
+	  sorry ("%<_Complex _BitInt(%d)%> unsupported",
+		 TYPE_PRECISION (subtype));
+	  return code1 == COMPLEX_TYPE ? t1 : t2;
+	}
       else
 	return build_complex_type (subtype);
     }
@@ -1004,6 +1009,20 @@ c_common_type (tree t1, tree t2)
     if (mv1 == FLOATNX_TYPE_NODE (i) || mv2 == FLOATNX_TYPE_NODE (i))
       return FLOATNX_TYPE_NODE (i);
 
+  if ((code1 == BITINT_TYPE || code2 == BITINT_TYPE) && code1 != code2)
+    {
+      /* Prefer any other integral types over bit-precise integer types.  */
+      if (TYPE_UNSIGNED (t1) == TYPE_UNSIGNED (t2))
+	return code1 == BITINT_TYPE ? t2 : t1;
+      /* If BITINT_TYPE is unsigned and the other type is signed
+	 non-BITINT_TYPE with the same precision, the latter has higher rank.
+	 In that case:
+	 Otherwise, both operands are converted to the unsigned integer type
+	 corresponding to the type of the operand with signed integer type.  */
+      if (TYPE_UNSIGNED (code1 == BITINT_TYPE ? t1 : t2))
+	return c_common_unsigned_type (code1 == BITINT_TYPE ? t2 : t1);
+    }
+
   /* Otherwise prefer the unsigned one.  */
 
   if (TYPE_UNSIGNED (t1))
@@ -1039,6 +1058,15 @@ common_type (tree t1, tree t2)
   return c_common_type (t1, t2);
 }
 
+struct comptypes_data {
+  bool enum_and_int_p;
+  bool different_types_p;
+  bool warning_needed;
+  bool anon_field;
+
+  const struct tagged_tu_seen_cache* cache;
+};
+
 /* Return 1 if TYPE1 and TYPE2 are compatible types for assignment
    or various other operations.  Return 2 if they are compatible
    but a warning may be needed if you use them together.  */
@@ -1046,13 +1074,10 @@ common_type (tree t1, tree t2)
 int
 comptypes (tree type1, tree type2)
 {
-  const struct tagged_tu_seen_cache * tagged_tu_seen_base1 = tagged_tu_seen_base;
-  int val;
+  struct comptypes_data data = { };
+  bool ret = comptypes_internal (type1, type2, &data);
 
-  val = comptypes_internal (type1, type2, NULL, NULL);
-  free_all_tagged_tu_seen_up_to (tagged_tu_seen_base1);
-
-  return val;
+  return ret ? (data.warning_needed ? 2 : 1) : 0;
 }
 
 /* Like comptypes, but if it returns non-zero because enum and int are
@@ -1061,13 +1086,11 @@ comptypes (tree type1, tree type2)
 int
 comptypes_check_enum_int (tree type1, tree type2, bool *enum_and_int_p)
 {
-  const struct tagged_tu_seen_cache * tagged_tu_seen_base1 = tagged_tu_seen_base;
-  int val;
+  struct comptypes_data data = { };
+  bool ret = comptypes_internal (type1, type2, &data);
+  *enum_and_int_p = data.enum_and_int_p;
 
-  val = comptypes_internal (type1, type2, enum_and_int_p, NULL);
-  free_all_tagged_tu_seen_up_to (tagged_tu_seen_base1);
-
-  return val;
+  return ret ? (data.warning_needed ? 2 : 1) : 0;
 }
 
 /* Like comptypes, but if it returns nonzero for different types, it
@@ -1077,41 +1100,37 @@ int
 comptypes_check_different_types (tree type1, tree type2,
 				 bool *different_types_p)
 {
-  const struct tagged_tu_seen_cache * tagged_tu_seen_base1 = tagged_tu_seen_base;
-  int val;
+  struct comptypes_data data = { };
+  bool ret = comptypes_internal (type1, type2, &data);
+  *different_types_p = data.different_types_p;
 
-  val = comptypes_internal (type1, type2, NULL, different_types_p);
-  free_all_tagged_tu_seen_up_to (tagged_tu_seen_base1);
-
-  return val;
+  return ret ? (data.warning_needed ? 2 : 1) : 0;
 }
 
-/* Return 1 if TYPE1 and TYPE2 are compatible types for assignment
-   or various other operations.  Return 2 if they are compatible
-   but a warning may be needed if you use them together.  If
-   ENUM_AND_INT_P is not NULL, and one type is an enum and the other a
-   compatible integer type, then this sets *ENUM_AND_INT_P to true;
-   *ENUM_AND_INT_P is never set to false.  If DIFFERENT_TYPES_P is not
-   NULL, and the types are compatible but different enough not to be
+/* Return true if TYPE1 and TYPE2 are compatible types for assignment
+   or various other operations.  If they are compatible but a warning may
+   be needed if you use them together, 'warning_needed' in DATA is set.
+   If one type is an enum and the other a compatible integer type, then
+   this sets 'enum_and_int_p' in DATA to true (it is never set to
+   false).  If the types are compatible but different enough not to be
    permitted in C11 typedef redeclarations, then this sets
-   *DIFFERENT_TYPES_P to true; *DIFFERENT_TYPES_P is never set to
+   'different_types_p' in DATA to true; it is never set to
    false, but may or may not be set if the types are incompatible.
    This differs from comptypes, in that we don't free the seen
    types.  */
 
-static int
-comptypes_internal (const_tree type1, const_tree type2, bool *enum_and_int_p,
-		    bool *different_types_p)
+static bool
+comptypes_internal (const_tree type1, const_tree type2,
+		    struct comptypes_data *data)
 {
   const_tree t1 = type1;
   const_tree t2 = type2;
-  int attrval, val;
 
   /* Suppress errors caused by previously reported errors.  */
 
   if (t1 == t2 || !t1 || !t2
       || TREE_CODE (t1) == ERROR_MARK || TREE_CODE (t2) == ERROR_MARK)
-    return 1;
+    return true;
 
   /* Enumerated types are compatible with integer types, but this is
      not transitive: two enumerated types in the same translation unit
@@ -1124,10 +1143,8 @@ comptypes_internal (const_tree type1, const_tree type2, bool *enum_and_int_p,
       t1 = ENUM_UNDERLYING_TYPE (t1);
       if (TREE_CODE (t2) != VOID_TYPE)
 	{
-	  if (enum_and_int_p != NULL)
-	    *enum_and_int_p = true;
-	  if (different_types_p != NULL)
-	    *different_types_p = true;
+	  data->enum_and_int_p = true;
+	  data->different_types_p = true;
 	}
     }
   else if (TREE_CODE (t2) == ENUMERAL_TYPE
@@ -1137,25 +1154,23 @@ comptypes_internal (const_tree type1, const_tree type2, bool *enum_and_int_p,
       t2 = ENUM_UNDERLYING_TYPE (t2);
       if (TREE_CODE (t1) != VOID_TYPE)
 	{
-	  if (enum_and_int_p != NULL)
-	    *enum_and_int_p = true;
-	  if (different_types_p != NULL)
-	    *different_types_p = true;
+	  data->enum_and_int_p = true;
+	  data->different_types_p = true;
 	}
     }
 
   if (t1 == t2)
-    return 1;
+    return true;
 
   /* Different classes of types can't be compatible.  */
 
   if (TREE_CODE (t1) != TREE_CODE (t2))
-    return 0;
+    return false;
 
   /* Qualifiers must match. C99 6.7.3p9 */
 
   if (TYPE_QUALS (t1) != TYPE_QUALS (t2))
-    return 0;
+    return false;
 
   /* Allow for two different type nodes which have essentially the same
      definition.  Note that we already checked for equality of the type
@@ -1163,20 +1178,23 @@ comptypes_internal (const_tree type1, const_tree type2, bool *enum_and_int_p,
 
   if (TREE_CODE (t1) != ARRAY_TYPE
       && TYPE_MAIN_VARIANT (t1) == TYPE_MAIN_VARIANT (t2))
-    return 1;
+    return true;
+
+  int attrval;
 
   /* 1 if no need for warning yet, 2 if warning cause has been seen.  */
   if (!(attrval = comp_type_attributes (t1, t2)))
-     return 0;
+     return false;
 
-  /* 1 if no need for warning yet, 2 if warning cause has been seen.  */
-  val = 0;
+  if (2 == attrval)
+    data->warning_needed = true;
 
   switch (TREE_CODE (t1))
     {
     case INTEGER_TYPE:
     case FIXED_POINT_TYPE:
     case REAL_TYPE:
+    case BITINT_TYPE:
       /* With these nodes, we can't determine type equivalence by
 	 looking at what is stored in the nodes themselves, because
 	 two nodes might have different TYPE_MAIN_VARIANTs but still
@@ -1196,16 +1214,11 @@ comptypes_internal (const_tree type1, const_tree type2, bool *enum_and_int_p,
     case POINTER_TYPE:
       /* Do not remove mode information.  */
       if (TYPE_MODE (t1) != TYPE_MODE (t2))
-	break;
-      val = (TREE_TYPE (t1) == TREE_TYPE (t2)
-	     ? 1 : comptypes_internal (TREE_TYPE (t1), TREE_TYPE (t2),
-				       enum_and_int_p, different_types_p));
-      break;
+	return false;
+      return comptypes_internal (TREE_TYPE (t1), TREE_TYPE (t2), data);
 
     case FUNCTION_TYPE:
-      val = function_types_compatible_p (t1, t2, enum_and_int_p,
-					 different_types_p);
-      break;
+      return function_types_compatible_p (t1, t2, data);
 
     case ARRAY_TYPE:
       {
@@ -1213,21 +1226,16 @@ comptypes_internal (const_tree type1, const_tree type2, bool *enum_and_int_p,
 	tree d2 = TYPE_DOMAIN (t2);
 	bool d1_variable, d2_variable;
 	bool d1_zero, d2_zero;
-	val = 1;
 
 	/* Target types must match incl. qualifiers.  */
-	if (TREE_TYPE (t1) != TREE_TYPE (t2)
-	    && (val = comptypes_internal (TREE_TYPE (t1), TREE_TYPE (t2),
-					  enum_and_int_p,
-					  different_types_p)) == 0)
-	  return 0;
+	if (!comptypes_internal (TREE_TYPE (t1), TREE_TYPE (t2), data))
+	  return false;
 
-	if (different_types_p != NULL
-	    && (d1 == NULL_TREE) != (d2 == NULL_TREE))
-	  *different_types_p = true;
+	if ((d1 == NULL_TREE) != (d2 == NULL_TREE))
+	  data->different_types_p = true;
 	/* Sizes must match unless one is missing or variable.  */
 	if (d1 == NULL_TREE || d2 == NULL_TREE || d1 == d2)
-	  break;
+	  return true;
 
 	d1_zero = !TYPE_MAX_VALUE (d1);
 	d2_zero = !TYPE_MAX_VALUE (d2);
@@ -1241,59 +1249,45 @@ comptypes_internal (const_tree type1, const_tree type2, bool *enum_and_int_p,
 	d1_variable = d1_variable || (d1_zero && C_TYPE_VARIABLE_SIZE (t1));
 	d2_variable = d2_variable || (d2_zero && C_TYPE_VARIABLE_SIZE (t2));
 
-	if (different_types_p != NULL
-	    && d1_variable != d2_variable)
-	  *different_types_p = true;
+	if (d1_variable != d2_variable)
+	  data->different_types_p = true;
 	if (d1_variable || d2_variable)
-	  break;
+	  return true;
 	if (d1_zero && d2_zero)
-	  break;
+	  return true;
 	if (d1_zero || d2_zero
 	    || !tree_int_cst_equal (TYPE_MIN_VALUE (d1), TYPE_MIN_VALUE (d2))
 	    || !tree_int_cst_equal (TYPE_MAX_VALUE (d1), TYPE_MAX_VALUE (d2)))
-	  val = 0;
+	  return false;
 
-	break;
+	return true;
       }
 
     case ENUMERAL_TYPE:
     case RECORD_TYPE:
     case UNION_TYPE:
-      if (val != 1 && false)
+      if (false)
 	{
-	  tree a1 = TYPE_ATTRIBUTES (t1);
-	  tree a2 = TYPE_ATTRIBUTES (t2);
-
-	  if (! attribute_list_contained (a1, a2)
-	      && ! attribute_list_contained (a2, a1))
-	    break;
-
-	  val = tagged_types_tu_compatible_p (t1, t2, enum_and_int_p,
-					      different_types_p);
-
-	  if (attrval != 2)
-	    return val;
+	  return tagged_types_tu_compatible_p (t1, t2, data);
 	}
-      break;
+      return false;
 
     case VECTOR_TYPE:
-      val = (known_eq (TYPE_VECTOR_SUBPARTS (t1), TYPE_VECTOR_SUBPARTS (t2))
-	     && comptypes_internal (TREE_TYPE (t1), TREE_TYPE (t2),
-				    enum_and_int_p, different_types_p));
-      break;
+      return known_eq (TYPE_VECTOR_SUBPARTS (t1), TYPE_VECTOR_SUBPARTS (t2))
+	     && comptypes_internal (TREE_TYPE (t1), TREE_TYPE (t2), data);
 
     default:
-      break;
+      return false;
     }
-  return attrval == 2 && val == 1 ? 2 : val;
+  gcc_unreachable ();
 }
 
-/* Return 1 if TTL and TTR are pointers to types that are equivalent, ignoring
+/* Return true if TTL and TTR are pointers to types that are equivalent, ignoring
    their qualifiers, except for named address spaces.  If the pointers point to
    different named addresses, then we must determine if one address space is a
    subset of the other.  */
 
-static int
+static bool
 comp_target_types (location_t location, tree ttl, tree ttr)
 {
   int val;
@@ -1333,7 +1327,7 @@ comp_target_types (location_t location, tree ttl, tree ttr)
 
   if (val == 1 && val_ped != 1)
     pedwarn_c11 (location, OPT_Wpedantic, "invalid use of pointers to arrays with different qualifiers "
-					  "in ISO C before C2X");
+					  "in ISO C before C23");
 
   if (val == 2)
     pedwarn (location, OPT_Wpedantic, "types are not quite compatible");
@@ -1347,65 +1341,15 @@ comp_target_types (location_t location, tree ttl, tree ttr)
 
 /* Subroutines of `comptypes'.  */
 
+/* Return true if two 'struct', 'union', or 'enum' types T1 and T2 are
+   compatible.  The two types are not the same (which has been
+   checked earlier in comptypes_internal).  */
 
-
-/* Allocate the seen two types, assuming that they are compatible. */
-
-static struct tagged_tu_seen_cache *
-alloc_tagged_tu_seen_cache (const_tree t1, const_tree t2)
-{
-  struct tagged_tu_seen_cache *tu = XNEW (struct tagged_tu_seen_cache);
-  tu->next = tagged_tu_seen_base;
-  tu->t1 = t1;
-  tu->t2 = t2;
-
-  tagged_tu_seen_base = tu;
-
-  /* The C standard says that two structures in different translation
-     units are compatible with each other only if the types of their
-     fields are compatible (among other things).  We assume that they
-     are compatible until proven otherwise when building the cache.
-     An example where this can occur is:
-     struct a
-     {
-       struct a *next;
-     };
-     If we are comparing this against a similar struct in another TU,
-     and did not assume they were compatible, we end up with an infinite
-     loop.  */
-  tu->val = 1;
-  return tu;
-}
-
-/* Free the seen types until we get to TU_TIL. */
-
-static void
-free_all_tagged_tu_seen_up_to (const struct tagged_tu_seen_cache *tu_til)
-{
-  const struct tagged_tu_seen_cache *tu = tagged_tu_seen_base;
-  while (tu != tu_til)
-    {
-      const struct tagged_tu_seen_cache *const tu1
-	= (const struct tagged_tu_seen_cache *) tu;
-      tu = tu1->next;
-      XDELETE (CONST_CAST (struct tagged_tu_seen_cache *, tu1));
-    }
-  tagged_tu_seen_base = tu_til;
-}
-
-/* Return 1 if two 'struct', 'union', or 'enum' types T1 and T2 are
-   compatible.  If the two types are not the same (which has been
-   checked earlier), this can only happen when multiple translation
-   units are being compiled.  See C99 6.2.7 paragraph 1 for the exact
-   rules.  ENUM_AND_INT_P and DIFFERENT_TYPES_P are as in
-   comptypes_internal.  */
-
-static int
+static bool
 tagged_types_tu_compatible_p (const_tree t1, const_tree t2,
-			      bool *enum_and_int_p, bool *different_types_p)
+			      struct comptypes_data *data)
 {
   tree s1, s2;
-  bool needs_warning = false;
 
   /* We have to verify that the tags of the types are the same.  This
      is harder than it looks because this may be a typedef, so we have
@@ -1423,217 +1367,123 @@ tagged_types_tu_compatible_p (const_tree t1, const_tree t2,
 	 && DECL_ORIGINAL_TYPE (TYPE_NAME (t2)))
     t2 = DECL_ORIGINAL_TYPE (TYPE_NAME (t2));
 
-  /* C90 didn't have the requirement that the two tags be the same.  */
-  if (flag_isoc99 && TYPE_NAME (t1) != TYPE_NAME (t2))
-    return 0;
+  if (TYPE_NAME (t1) != TYPE_NAME (t2))
+    return false;
 
-  /* C90 didn't say what happened if one or both of the types were
-     incomplete; we choose to follow C99 rules here, which is that they
-     are compatible.  */
-  if (TYPE_SIZE (t1) == NULL
-      || TYPE_SIZE (t2) == NULL)
-    return 1;
+  if (!data->anon_field && NULL_TREE == TYPE_NAME (t1))
+    return false;
 
-  {
-    const struct tagged_tu_seen_cache * tts_i;
-    for (tts_i = tagged_tu_seen_base; tts_i != NULL; tts_i = tts_i->next)
-      if (tts_i->t1 == t1 && tts_i->t2 == t2)
-	return tts_i->val;
-  }
+  if (!data->anon_field && TYPE_STUB_DECL (t1) != TYPE_STUB_DECL (t2))
+    data->different_types_p = true;
+
+  data->anon_field = false;
+
+  /* Incomplete types are incompatible inside a TU.  */
+  if (TYPE_SIZE (t1) == NULL || TYPE_SIZE (t2) == NULL)
+    return false;
+
+  if (ENUMERAL_TYPE != TREE_CODE (t1)
+      && (TYPE_REVERSE_STORAGE_ORDER (t1)
+	  != TYPE_REVERSE_STORAGE_ORDER (t2)))
+    return false;
+
+  /* For types already being looked at in some active
+     invocation of this function, assume compatibility.
+     The cache is built as a linked list on the stack
+     with the head of the list passed downwards.  */
+  for (const struct tagged_tu_seen_cache *t = data->cache;
+       t != NULL; t = t->next)
+    if (t->t1 == t1 && t->t2 == t2)
+      return true;
+
+  const struct tagged_tu_seen_cache entry = { data->cache, t1, t2 };
 
   switch (TREE_CODE (t1))
     {
     case ENUMERAL_TYPE:
       {
-	struct tagged_tu_seen_cache *tu = alloc_tagged_tu_seen_cache (t1, t2);
 	/* Speed up the case where the type values are in the same order.  */
 	tree tv1 = TYPE_VALUES (t1);
 	tree tv2 = TYPE_VALUES (t2);
 
 	if (tv1 == tv2)
-	  {
-	    return 1;
-	  }
+	  return true;
 
 	for (;tv1 && tv2; tv1 = TREE_CHAIN (tv1), tv2 = TREE_CHAIN (tv2))
 	  {
 	    if (TREE_PURPOSE (tv1) != TREE_PURPOSE (tv2))
 	      break;
-	    if (simple_cst_equal (TREE_VALUE (tv1), TREE_VALUE (tv2)) != 1)
-	      {
-		tu->val = 0;
-		return 0;
-	      }
+
+	    if (simple_cst_equal (DECL_INITIAL (TREE_VALUE (tv1)),
+				  DECL_INITIAL (TREE_VALUE (tv2))) != 1)
+	      break;
 	  }
 
 	if (tv1 == NULL_TREE && tv2 == NULL_TREE)
-	  {
-	    return 1;
-	  }
+	  return true;
+
 	if (tv1 == NULL_TREE || tv2 == NULL_TREE)
-	  {
-	    tu->val = 0;
-	    return 0;
-	  }
+	  return false;
 
 	if (list_length (TYPE_VALUES (t1)) != list_length (TYPE_VALUES (t2)))
-	  {
-	    tu->val = 0;
-	    return 0;
-	  }
+	  return false;
 
 	for (s1 = TYPE_VALUES (t1); s1; s1 = TREE_CHAIN (s1))
 	  {
 	    s2 = purpose_member (TREE_PURPOSE (s1), TYPE_VALUES (t2));
+
 	    if (s2 == NULL
-		|| simple_cst_equal (TREE_VALUE (s1), TREE_VALUE (s2)) != 1)
-	      {
-		tu->val = 0;
-		return 0;
-	      }
+		|| simple_cst_equal (DECL_INITIAL (TREE_VALUE (s1)),
+				     DECL_INITIAL (TREE_VALUE (s2))) != 1)
+	      return false;
 	  }
-	return 1;
+
+	return true;
       }
 
     case UNION_TYPE:
-      {
-	struct tagged_tu_seen_cache *tu = alloc_tagged_tu_seen_cache (t1, t2);
-
-	if (list_length (TYPE_FIELDS (t1)) != list_length (TYPE_FIELDS (t2)))
-	  {
-	    tu->val = 0;
-	    return 0;
-	  }
-
-	/*  Speed up the common case where the fields are in the same order. */
-	for (s1 = TYPE_FIELDS (t1), s2 = TYPE_FIELDS (t2); s1 && s2;
-	     s1 = DECL_CHAIN (s1), s2 = DECL_CHAIN (s2))
-	  {
-	    int result;
-
-	    if (DECL_NAME (s1) != DECL_NAME (s2))
-	      break;
-	    result = comptypes_internal (TREE_TYPE (s1), TREE_TYPE (s2),
-					 enum_and_int_p, different_types_p);
-
-	    if (result != 1 && !DECL_NAME (s1))
-	      break;
-	    if (result == 0)
-	      {
-		tu->val = 0;
-		return 0;
-	      }
-	    if (result == 2)
-	      needs_warning = true;
-
-	    if (TREE_CODE (s1) == FIELD_DECL
-		&& simple_cst_equal (DECL_FIELD_BIT_OFFSET (s1),
-				     DECL_FIELD_BIT_OFFSET (s2)) != 1)
-	      {
-		tu->val = 0;
-		return 0;
-	      }
-	  }
-	if (!s1 && !s2)
-	  {
-	    tu->val = needs_warning ? 2 : 1;
-	    return tu->val;
-	  }
-
-	for (s1 = TYPE_FIELDS (t1); s1; s1 = DECL_CHAIN (s1))
-	  {
-	    bool ok = false;
-
-	    for (s2 = TYPE_FIELDS (t2); s2; s2 = DECL_CHAIN (s2))
-	      if (DECL_NAME (s1) == DECL_NAME (s2))
-		{
-		  int result;
-
-		  result = comptypes_internal (TREE_TYPE (s1), TREE_TYPE (s2),
-					       enum_and_int_p,
-					       different_types_p);
-
-		  if (result != 1 && !DECL_NAME (s1))
-		    continue;
-		  if (result == 0)
-		    {
-		      tu->val = 0;
-		      return 0;
-		    }
-		  if (result == 2)
-		    needs_warning = true;
-
-		  if (TREE_CODE (s1) == FIELD_DECL
-		      && simple_cst_equal (DECL_FIELD_BIT_OFFSET (s1),
-					   DECL_FIELD_BIT_OFFSET (s2)) != 1)
-		    break;
-
-		  ok = true;
-		  break;
-		}
-	    if (!ok)
-	      {
-		tu->val = 0;
-		return 0;
-	      }
-	  }
-	tu->val = needs_warning ? 2 : 1;
-	return tu->val;
-      }
-
     case RECORD_TYPE:
-      {
-	struct tagged_tu_seen_cache *tu = alloc_tagged_tu_seen_cache (t1, t2);
 
 	if (list_length (TYPE_FIELDS (t1)) != list_length (TYPE_FIELDS (t2)))
-	  {
-	    tu->val = 0;
-	    return 0;
-	  }
+	  return false;
 
 	for (s1 = TYPE_FIELDS (t1), s2 = TYPE_FIELDS (t2);
 	     s1 && s2;
 	     s1 = DECL_CHAIN (s1), s2 = DECL_CHAIN (s2))
 	  {
-	    int result;
 	    if (TREE_CODE (s1) != TREE_CODE (s2)
 		|| DECL_NAME (s1) != DECL_NAME (s2))
-	      break;
-	    result = comptypes_internal (TREE_TYPE (s1), TREE_TYPE (s2),
-					 enum_and_int_p, different_types_p);
-	    if (result == 0)
-	      break;
-	    if (result == 2)
-	      needs_warning = true;
+	      return false;
+
+	    if (!DECL_NAME (s1) && RECORD_OR_UNION_TYPE_P (TREE_TYPE (s1)))
+	      data->anon_field = true;
+
+	    data->cache = &entry;
+	    if (!comptypes_internal (TREE_TYPE (s1), TREE_TYPE (s2), data))
+	      return false;
 
 	    if (TREE_CODE (s1) == FIELD_DECL
 		&& simple_cst_equal (DECL_FIELD_BIT_OFFSET (s1),
 				     DECL_FIELD_BIT_OFFSET (s2)) != 1)
-	      break;
+	      return false;
 	  }
-	if (s1 && s2)
-	  tu->val = 0;
-	else
-	  tu->val = needs_warning ? 2 : 1;
-	return tu->val;
-      }
+	return true;
 
     default:
       gcc_unreachable ();
     }
 }
 
-/* Return 1 if two function types F1 and F2 are compatible.
+/* Return true if two function types F1 and F2 are compatible.
    If either type specifies no argument types,
    the other must specify a fixed number of self-promoting arg types.
    Otherwise, if one type specifies only the number of arguments,
    the other must specify that number of self-promoting arg types.
-   Otherwise, the argument types must match.
-   ENUM_AND_INT_P and DIFFERENT_TYPES_P are as in comptypes_internal.  */
+   Otherwise, the argument types must match.  */
 
-static int
+static bool
 function_types_compatible_p (const_tree f1, const_tree f2,
-			     bool *enum_and_int_p, bool *different_types_p)
+			     struct comptypes_data *data)
 {
   tree args1, args2;
   /* 1 if no need for warning yet, 2 if warning cause has been seen.  */
@@ -1654,16 +1504,15 @@ function_types_compatible_p (const_tree f1, const_tree f2,
   if (TYPE_VOLATILE (ret2))
     ret2 = build_qualified_type (TYPE_MAIN_VARIANT (ret2),
 				 TYPE_QUALS (ret2) & ~TYPE_QUAL_VOLATILE);
-  val = comptypes_internal (ret1, ret2, enum_and_int_p, different_types_p);
+  val = comptypes_internal (ret1, ret2, data);
   if (val == 0)
     return 0;
 
   args1 = TYPE_ARG_TYPES (f1);
   args2 = TYPE_ARG_TYPES (f2);
 
-  if (different_types_p != NULL
-      && (args1 == NULL_TREE) != (args2 == NULL_TREE))
-    *different_types_p = true;
+  if ((args1 == NULL_TREE) != (args2 == NULL_TREE))
+    data->different_types_p = true;
 
   /* An unspecified parmlist matches any specified parmlist
      whose argument types don't need default promotions.  */
@@ -1679,8 +1528,11 @@ function_types_compatible_p (const_tree f1, const_tree f2,
 	 If they don't match, ask for a warning (but no error).  */
       if (TYPE_ACTUAL_ARG_TYPES (f1)
 	  && type_lists_compatible_p (args2, TYPE_ACTUAL_ARG_TYPES (f1),
-				      enum_and_int_p, different_types_p) != 1)
-	val = 2;
+				      data) != 1)
+	{
+	  val = 1;
+	  data->warning_needed = true;
+	}
       return val;
     }
   if (args2 == NULL_TREE)
@@ -1691,35 +1543,31 @@ function_types_compatible_p (const_tree f1, const_tree f2,
 	return 0;
       if (TYPE_ACTUAL_ARG_TYPES (f2)
 	  && type_lists_compatible_p (args1, TYPE_ACTUAL_ARG_TYPES (f2),
-				      enum_and_int_p, different_types_p) != 1)
-	val = 2;
+				      data) != 1)
+	{
+	  val = 1;
+	  data->warning_needed = true;
+	}
       return val;
     }
 
   /* Both types have argument lists: compare them and propagate results.  */
-  val1 = type_lists_compatible_p (args1, args2, enum_and_int_p,
-				  different_types_p);
-  return val1 != 1 ? val1 : val;
+  val1 = type_lists_compatible_p (args1, args2, data);
+  return val1;
 }
 
-/* Check two lists of types for compatibility, returning 0 for
-   incompatible, 1 for compatible, or 2 for compatible with
-   warning.  ENUM_AND_INT_P and DIFFERENT_TYPES_P are as in
-   comptypes_internal.  */
+/* Check two lists of types for compatibility, returning false for
+   incompatible, true for compatible.  */
 
-static int
+static bool
 type_lists_compatible_p (const_tree args1, const_tree args2,
-			 bool *enum_and_int_p, bool *different_types_p)
+			 struct comptypes_data *data)
 {
-  /* 1 if no need for warning yet, 2 if warning cause has been seen.  */
-  int val = 1;
-  int newval = 0;
-
   while (1)
     {
       tree a1, mv1, a2, mv2;
       if (args1 == NULL_TREE && args2 == NULL_TREE)
-	return val;
+	return true;
       /* If one list is shorter than the other,
 	 they fail to match.  */
       if (args1 == NULL_TREE || args2 == NULL_TREE)
@@ -1740,9 +1588,8 @@ type_lists_compatible_p (const_tree args1, const_tree args2,
 	 means there is supposed to be an argument
 	 but nothing is specified about what type it has.
 	 So match anything that self-promotes.  */
-      if (different_types_p != NULL
-	  && (a1 == NULL_TREE) != (a2 == NULL_TREE))
-	*different_types_p = true;
+      if ((a1 == NULL_TREE) != (a2 == NULL_TREE))
+	data->different_types_p = true;
       if (a1 == NULL_TREE)
 	{
 	  if (c_type_promotes_to (a2) != a2)
@@ -1757,11 +1604,9 @@ type_lists_compatible_p (const_tree args1, const_tree args2,
       else if (TREE_CODE (a1) == ERROR_MARK
 	       || TREE_CODE (a2) == ERROR_MARK)
 	;
-      else if (!(newval = comptypes_internal (mv1, mv2, enum_and_int_p,
-					      different_types_p)))
+      else if (!comptypes_internal (mv1, mv2, data))
 	{
-	  if (different_types_p != NULL)
-	    *different_types_p = true;
+	  data->different_types_p = true;
 	  /* Allow  wait (union {union wait *u; int *i} *)
 	     and  wait (union wait *)  to be compatible.  */
 	  if (TREE_CODE (a1) == UNION_TYPE
@@ -1782,8 +1627,7 @@ type_lists_compatible_p (const_tree args1, const_tree args2,
 			   ? c_build_qualified_type (TYPE_MAIN_VARIANT (mv3),
 						     TYPE_QUAL_ATOMIC)
 			   : TYPE_MAIN_VARIANT (mv3));
-		  if (comptypes_internal (mv3, mv2, enum_and_int_p,
-					  different_types_p))
+		  if (comptypes_internal (mv3, mv2, data))
 		    break;
 		}
 	      if (memb == NULL_TREE)
@@ -1807,8 +1651,7 @@ type_lists_compatible_p (const_tree args1, const_tree args2,
 			   ? c_build_qualified_type (TYPE_MAIN_VARIANT (mv3),
 						     TYPE_QUAL_ATOMIC)
 			   : TYPE_MAIN_VARIANT (mv3));
-		  if (comptypes_internal (mv3, mv1, enum_and_int_p,
-					  different_types_p))
+		  if (comptypes_internal (mv3, mv1, data))
 		    break;
 		}
 	      if (memb == NULL_TREE)
@@ -1817,10 +1660,6 @@ type_lists_compatible_p (const_tree args1, const_tree args2,
 	  else
 	    return 0;
 	}
-
-      /* comptypes said ok, but record if it said to warn.  */
-      if (newval > val)
-	val = newval;
 
       args1 = TREE_CHAIN (args1);
       args2 = TREE_CHAIN (args2);
@@ -2099,7 +1938,7 @@ really_atomic_lvalue (tree expr)
   return true;
 }
 
-/* If EXPR is a named constant (C2x) derived from a constexpr variable
+/* If EXPR is a named constant (C23) derived from a constexpr variable
    - that is, a reference to such a variable, or a member extracted by
    a sequence of structure and union (but not array) member accesses
    (where union member accesses must access the same member as
@@ -2260,12 +2099,17 @@ perform_integral_promotions (tree exp)
   /* ??? This should no longer be needed now bit-fields have their
      proper types.  */
   if (TREE_CODE (exp) == COMPONENT_REF
-      && DECL_C_BIT_FIELD (TREE_OPERAND (exp, 1))
+      && DECL_C_BIT_FIELD (TREE_OPERAND (exp, 1)))
+    {
+      if (TREE_CODE (DECL_BIT_FIELD_TYPE (TREE_OPERAND (exp, 1)))
+	  == BITINT_TYPE)
+	return convert (DECL_BIT_FIELD_TYPE (TREE_OPERAND (exp, 1)), exp);
       /* If it's thinner than an int, promote it like a
 	 c_promoting_integer_type_p, otherwise leave it alone.  */
-      && compare_tree_int (DECL_SIZE (TREE_OPERAND (exp, 1)),
-			   TYPE_PRECISION (integer_type_node)) < 0)
-    return convert (integer_type_node, exp);
+      if (compare_tree_int (DECL_SIZE (TREE_OPERAND (exp, 1)),
+			    TYPE_PRECISION (integer_type_node)) < 0)
+	return convert (integer_type_node, exp);
+    }
 
   if (c_promoting_integer_type_p (type))
     {
@@ -2790,7 +2634,8 @@ build_array_ref (location_t loc, tree array, tree index)
   if (index == error_mark_node)
     return error_mark_node;
 
-  gcc_assert (TREE_CODE (TREE_TYPE (index)) == INTEGER_TYPE);
+  gcc_assert (TREE_CODE (TREE_TYPE (index)) == INTEGER_TYPE
+	      || TREE_CODE (TREE_TYPE (index)) == BITINT_TYPE);
 
   bool was_vector = VECTOR_TYPE_P (TREE_TYPE (array));
   bool non_lvalue = convert_vector_to_array_for_subscript (loc, &array, index);
@@ -3378,7 +3223,7 @@ convert_argument (location_t ploc, tree function, tree fundecl,
     {
       error_at (ploc, "type of formal parameter %d is incomplete",
 		parmnum + 1);
-      return val;
+      return error_mark_node;
     }
 
   /* Optionally warn about conversions that differ from the default
@@ -4558,6 +4403,7 @@ build_unary_op (location_t location, enum tree_code code, tree xarg,
 	 associativity, but won't generate any code.  */
       if (!(typecode == INTEGER_TYPE || typecode == REAL_TYPE
 	    || typecode == FIXED_POINT_TYPE || typecode == COMPLEX_TYPE
+	    || typecode == BITINT_TYPE
 	    || gnu_vector_type_p (TREE_TYPE (arg))))
 	{
 	  error_at (location, "wrong type argument to unary plus");
@@ -4571,6 +4417,7 @@ build_unary_op (location_t location, enum tree_code code, tree xarg,
     case NEGATE_EXPR:
       if (!(typecode == INTEGER_TYPE || typecode == REAL_TYPE
 	    || typecode == FIXED_POINT_TYPE || typecode == COMPLEX_TYPE
+	    || typecode == BITINT_TYPE
 	    || gnu_vector_type_p (TREE_TYPE (arg))))
 	{
 	  error_at (location, "wrong type argument to unary minus");
@@ -4583,6 +4430,7 @@ build_unary_op (location_t location, enum tree_code code, tree xarg,
     case BIT_NOT_EXPR:
       /* ~ works on integer types and non float vectors. */
       if (typecode == INTEGER_TYPE
+	  || typecode == BITINT_TYPE
 	  || (gnu_vector_type_p (TREE_TYPE (arg))
 	      && !VECTOR_FLOAT_TYPE_P (TREE_TYPE (arg))))
 	{
@@ -4657,7 +4505,8 @@ build_unary_op (location_t location, enum tree_code code, tree xarg,
     case TRUTH_NOT_EXPR:
       if (typecode != INTEGER_TYPE && typecode != FIXED_POINT_TYPE
 	  && typecode != REAL_TYPE && typecode != POINTER_TYPE
-	  && typecode != COMPLEX_TYPE && typecode != NULLPTR_TYPE)
+	  && typecode != COMPLEX_TYPE && typecode != NULLPTR_TYPE
+	  && typecode != BITINT_TYPE)
 	{
 	  error_at (location,
 		    "wrong type argument to unary exclamation mark");
@@ -4769,7 +4618,7 @@ build_unary_op (location_t location, enum tree_code code, tree xarg,
 
       if (typecode != POINTER_TYPE && typecode != FIXED_POINT_TYPE
 	  && typecode != INTEGER_TYPE && typecode != REAL_TYPE
-	  && typecode != COMPLEX_TYPE
+	  && typecode != COMPLEX_TYPE && typecode != BITINT_TYPE
 	  && !gnu_vector_type_p (TREE_TYPE (arg)))
 	{
 	  if (code == PREINCREMENT_EXPR || code == POSTINCREMENT_EXPR)
@@ -5351,9 +5200,9 @@ build_conditional_expr (location_t colon_loc, tree ifexp, bool ifexp_bcp,
   if ((TREE_CODE (op1) == EXCESS_PRECISION_EXPR
        || TREE_CODE (op2) == EXCESS_PRECISION_EXPR)
       && (code1 == INTEGER_TYPE || code1 == REAL_TYPE
-	  || code1 == COMPLEX_TYPE)
+	  || code1 == COMPLEX_TYPE || code1 == BITINT_TYPE)
       && (code2 == INTEGER_TYPE || code2 == REAL_TYPE
-	  || code2 == COMPLEX_TYPE))
+	  || code2 == COMPLEX_TYPE || code2 == BITINT_TYPE))
     {
       semantic_result_type = c_common_type (type1, type2);
       if (TREE_CODE (op1) == EXCESS_PRECISION_EXPR)
@@ -5394,9 +5243,9 @@ build_conditional_expr (location_t colon_loc, tree ifexp, bool ifexp_bcp,
 	result_type = TYPE_MAIN_VARIANT (type1);
     }
   else if ((code1 == INTEGER_TYPE || code1 == REAL_TYPE
-	    || code1 == COMPLEX_TYPE)
+	    || code1 == COMPLEX_TYPE || code1 == BITINT_TYPE)
 	   && (code2 == INTEGER_TYPE || code2 == REAL_TYPE
-	       || code2 == COMPLEX_TYPE))
+	       || code2 == COMPLEX_TYPE || code2 == BITINT_TYPE))
     {
       /* In C11, a conditional expression between a floating-point
 	 type and an integer type should convert the integer type to
@@ -5547,21 +5396,21 @@ build_conditional_expr (location_t colon_loc, tree ifexp, bool ifexp_bcp,
 	  if ((TREE_CODE (t2) == ARRAY_TYPE)
 	      && (TYPE_QUALS (t2_stripped) & ~TYPE_QUALS (t1)))
 	    {
-	      if (!flag_isoc2x)
+	      if (!flag_isoc23)
 		warning_at (colon_loc, OPT_Wdiscarded_array_qualifiers,
 			    "pointer to array loses qualifier "
 			    "in conditional expression");
-	      else if (warn_c11_c2x_compat > 0)
-		warning_at (colon_loc, OPT_Wc11_c2x_compat,
+	      else if (warn_c11_c23_compat > 0)
+		warning_at (colon_loc, OPT_Wc11_c23_compat,
 			    "pointer to array loses qualifier "
-			    "in conditional expression in ISO C before C2X");
+			    "in conditional expression in ISO C before C23");
 	    }
 	  if (TREE_CODE (t2) == FUNCTION_TYPE)
 	    pedwarn (colon_loc, OPT_Wpedantic,
 		     "ISO C forbids conditional expr between "
 		     "%<void *%> and function pointer");
 	  /* for array, use qualifiers of element type */
-	  if (flag_isoc2x)
+	  if (flag_isoc23)
 	    t2 = t2_stripped;
 	  result_type = build_pointer_type (qualify_type (t1, t2));
 	}
@@ -5571,22 +5420,23 @@ build_conditional_expr (location_t colon_loc, tree ifexp, bool ifexp_bcp,
       else
 	{
 	  int qual = ENCODE_QUAL_ADDR_SPACE (as_common);
-	  if (bltin1 && bltin2)
-	    warning_at (colon_loc, OPT_Wincompatible_pointer_types,
-			"pointer type mismatch between %qT and %qT "
-			"of %qD and %qD in conditional expression",
-			type1, type2, bltin1, bltin2);
-	  else
-	    pedwarn (colon_loc, 0,
-		     "pointer type mismatch in conditional expression");
+	  if (emit_diagnostic (bltin1 && bltin2 ? DK_WARNING : DK_PEDWARN,
+			       colon_loc, OPT_Wincompatible_pointer_types,
+			       "pointer type mismatch "
+			       "in conditional expression"))
+	    {
+	      inform (op1_loc, "first expression has type %qT", type1);
+	      inform (op2_loc, "second expression has type %qT", type2);
+	    }
 	  result_type = build_pointer_type
 			  (build_qualified_type (void_type_node, qual));
 	}
     }
-  else if (code1 == POINTER_TYPE && code2 == INTEGER_TYPE)
+  else if (code1 == POINTER_TYPE
+	   && (code2 == INTEGER_TYPE || code2 == BITINT_TYPE))
     {
       if (!null_pointer_constant_p (orig_op2))
-	pedwarn (colon_loc, 0,
+	pedwarn (colon_loc, OPT_Wint_conversion,
 		 "pointer/integer type mismatch in conditional expression");
       else
 	{
@@ -5594,10 +5444,11 @@ build_conditional_expr (location_t colon_loc, tree ifexp, bool ifexp_bcp,
 	}
       result_type = type1;
     }
-  else if (code2 == POINTER_TYPE && code1 == INTEGER_TYPE)
+  else if (code2 == POINTER_TYPE
+	   && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
     {
       if (!null_pointer_constant_p (orig_op1))
-	pedwarn (colon_loc, 0,
+	pedwarn (colon_loc, OPT_Wint_conversion,
 		 "pointer/integer type mismatch in conditional expression");
       else
 	{
@@ -5965,6 +5816,9 @@ handle_warn_cast_qual (location_t loc, tree type, tree otype)
 static bool
 c_safe_arg_type_equiv_p (tree t1, tree t2)
 {
+  if (error_operand_p (t1) || error_operand_p (t2))
+    return true;
+
   t1 = TYPE_MAIN_VARIANT (t1);
   t2 = TYPE_MAIN_VARIANT (t2);
 
@@ -6062,9 +5916,13 @@ build_c_cast (location_t loc, tree type, tree expr)
 
   if (type == TYPE_MAIN_VARIANT (TREE_TYPE (value)))
     {
-      if (RECORD_OR_UNION_TYPE_P (type))
-	pedwarn (loc, OPT_Wpedantic,
-		 "ISO C forbids casting nonscalar to the same type");
+      if (RECORD_OR_UNION_TYPE_P (type)
+	  && pedwarn (loc, OPT_Wpedantic,
+		      "ISO C forbids casting nonscalar to the same type"))
+	      ;
+      else if (warn_useless_cast)
+	warning_at (loc, OPT_Wuseless_cast,
+		    "useless cast to type %qT", type);
 
       /* Convert to remove any qualifiers from VALUE's type.  */
       value = convert (type, value);
@@ -6161,7 +6019,8 @@ build_c_cast (location_t loc, tree type, tree expr)
 	warning_at (loc, OPT_Wcast_align,
 		    "cast increases required alignment of target type");
 
-      if (TREE_CODE (type) == INTEGER_TYPE
+      if ((TREE_CODE (type) == INTEGER_TYPE
+	   || TREE_CODE (type) == BITINT_TYPE)
 	  && TREE_CODE (otype) == POINTER_TYPE
 	  && TYPE_PRECISION (type) != TYPE_PRECISION (otype))
       /* Unlike conversion of integers to pointers, where the
@@ -6179,7 +6038,8 @@ build_c_cast (location_t loc, tree type, tree expr)
 		    "to non-matching type %qT", otype, type);
 
       if (TREE_CODE (type) == POINTER_TYPE
-	  && TREE_CODE (otype) == INTEGER_TYPE
+	  && (TREE_CODE (otype) == INTEGER_TYPE
+	      || TREE_CODE (otype) == BITINT_TYPE)
 	  && TYPE_PRECISION (type) != TYPE_PRECISION (otype)
 	  /* Don't warn about converting any constant.  */
 	  && !TREE_CONSTANT (value))
@@ -7131,11 +6991,11 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
   else if ((codel == INTEGER_TYPE || codel == REAL_TYPE
 	    || codel == FIXED_POINT_TYPE
 	    || codel == ENUMERAL_TYPE || codel == COMPLEX_TYPE
-	    || codel == BOOLEAN_TYPE)
+	    || codel == BOOLEAN_TYPE || codel == BITINT_TYPE)
 	   && (coder == INTEGER_TYPE || coder == REAL_TYPE
 	       || coder == FIXED_POINT_TYPE
 	       || coder == ENUMERAL_TYPE || coder == COMPLEX_TYPE
-	       || coder == BOOLEAN_TYPE))
+	       || coder == BOOLEAN_TYPE || coder == BITINT_TYPE))
     {
       if (warnopt && errtype == ic_argpass)
 	maybe_warn_builtin_no_proto_arg (expr_loc, fundecl, parmnum, type,
@@ -7294,7 +7154,7 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
       tree mvl = ttl;
       tree mvr = ttr;
       bool is_opaque_pointer;
-      int target_cmp = 0;   /* Cache comp_target_types () result.  */
+      bool target_cmp = false;   /* Cache comp_target_types () result.  */
       addr_space_t asl;
       addr_space_t asr;
 
@@ -7342,6 +7202,35 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
 		    OPT_Wc___compat,
 		    "request for implicit conversion "
 		    "from %qT to %qT not permitted in C++", rhstype, type);
+
+      /* Warn of new allocations that are not big enough for the target
+	 type.  */
+      tree fndecl;
+      if (warn_alloc_size
+	  && TREE_CODE (rhs) == CALL_EXPR
+	  && (fndecl = get_callee_fndecl (rhs)) != NULL_TREE
+	  && DECL_IS_MALLOC (fndecl))
+	{
+	  tree fntype = TREE_TYPE (fndecl);
+	  tree fntypeattrs = TYPE_ATTRIBUTES (fntype);
+	  tree alloc_size = lookup_attribute ("alloc_size", fntypeattrs);
+	  if (alloc_size)
+	    {
+	      tree args = TREE_VALUE (alloc_size);
+	      int idx = TREE_INT_CST_LOW (TREE_VALUE (args)) - 1;
+	      /* For calloc only use the second argument.  */
+	      if (TREE_CHAIN (args))
+		idx = TREE_INT_CST_LOW (TREE_VALUE (TREE_CHAIN (args))) - 1;
+	      tree arg = CALL_EXPR_ARG (rhs, idx);
+	      if (TREE_CODE (arg) == INTEGER_CST
+		  && !VOID_TYPE_P (ttl) && TYPE_SIZE_UNIT (ttl)
+		  && INTEGER_CST == TREE_CODE (TYPE_SIZE_UNIT (ttl))
+		  && tree_int_cst_lt (arg, TYPE_SIZE_UNIT (ttl)))
+		 warning_at (location, OPT_Walloc_size, "allocation of "
+			     "insufficient size %qE for type %qT with "
+			     "size %qE", arg, ttl, TYPE_SIZE_UNIT (ttl));
+	    }
+	}
 
       /* See if the pointers point to incompatible address spaces.  */
       asl = TYPE_ADDR_SPACE (ttl);
@@ -7445,6 +7334,7 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
 
       /* See if the pointers point to incompatible scalar storage orders.  */
       if (warn_scalar_storage_order
+	  && !null_pointer_constant_p (rhs)
 	  && (AGGREGATE_TYPE_P (ttl) && TYPE_REVERSE_STORAGE_ORDER (ttl))
 	     != (AGGREGATE_TYPE_P (ttr) && TYPE_REVERSE_STORAGE_ORDER (ttr)))
 	{
@@ -7513,7 +7403,7 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
 
 	      if (TYPE_QUALS_NO_ADDR_SPACE_NO_ATOMIC (ttr)
 		  & ~TYPE_QUALS_NO_ADDR_SPACE_NO_ATOMIC (ttl))
-		WARNING_FOR_QUALIFIERS (flag_isoc2x,
+		WARNING_FOR_QUALIFIERS (flag_isoc23,
 					location, expr_loc,
 					OPT_Wdiscarded_array_qualifiers,
 					G_("passing argument %d of %qE discards "
@@ -7556,7 +7446,7 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
 	      /* Don't warn about loss of qualifier for conversions from
 		 qualified void* to pointers to arrays with corresponding
 		 qualifier on the element type (except for pedantic before C23). */
-	      if (warn_quals || (warn_quals_ped && pedantic && !flag_isoc2x))
+	      if (warn_quals || (warn_quals_ped && pedantic && !flag_isoc23))
 		PEDWARN_FOR_QUALIFIERS (location, expr_loc,
 					OPT_Wdiscarded_qualifiers,
 					G_("passing argument %d of %qE discards "
@@ -7569,8 +7459,8 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
 					   "pointer target type"),
 					TYPE_QUALS (ttr) & ~TYPE_QUALS (ttl));
 	      else if (warn_quals_ped)
-		pedwarn_c11 (location, OPT_Wc11_c2x_compat,
-			     "array with qualifier on the element is not qualified before C2X");
+		pedwarn_c11 (location, OPT_Wc11_c23_compat,
+			     "array with qualifier on the element is not qualified before C23");
 
 	      /* If this is not a case of ignoring a mismatch in signedness,
 		 no warning.  */
@@ -7711,7 +7601,9 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
       return error_mark_node;
     }
   else if (codel == POINTER_TYPE
-	   && (coder == INTEGER_TYPE || coder == NULLPTR_TYPE))
+	   && (coder == INTEGER_TYPE
+	       || coder == NULLPTR_TYPE
+	       || coder == BITINT_TYPE))
     {
       /* An explicit constant 0 or type nullptr_t can convert to a pointer,
 	 or one that results from arithmetic, even including a cast to
@@ -7752,7 +7644,8 @@ convert_for_assignment (location_t location, location_t expr_loc, tree type,
 
       return convert (type, rhs);
     }
-  else if (codel == INTEGER_TYPE && coder == POINTER_TYPE)
+  else if ((codel == INTEGER_TYPE || codel == BITINT_TYPE)
+	   && coder == POINTER_TYPE)
     {
       switch (errtype)
 	{
@@ -8562,7 +8455,8 @@ digest_init (location_t init_loc, tree type, tree init, tree origtype,
 
   if (code == INTEGER_TYPE || code == REAL_TYPE || code == FIXED_POINT_TYPE
       || code == POINTER_TYPE || code == ENUMERAL_TYPE || code == BOOLEAN_TYPE
-      || code == COMPLEX_TYPE || code == VECTOR_TYPE || code == NULLPTR_TYPE)
+      || code == COMPLEX_TYPE || code == VECTOR_TYPE || code == NULLPTR_TYPE
+      || code == BITINT_TYPE)
     {
       tree unconverted_init = inside_init;
       if (TREE_CODE (TREE_TYPE (init)) == ARRAY_TYPE
@@ -9344,7 +9238,7 @@ pop_init_level (location_t loc, int implicit,
     {
       /* A nonincremental scalar initializer--just return
 	 the element, after verifying there is just one.
-         Empty scalar initializers are supported in C2X.  */
+         Empty scalar initializers are supported in C23.  */
       if (vec_safe_is_empty (constructor_elements))
 	{
 	  if (constructor_erroneous || constructor_type == error_mark_node)
@@ -11273,17 +11167,11 @@ c_finish_return (location_t loc, tree retval, tree origtype)
       if ((warn_return_type >= 0 || flag_isoc99)
 	  && valtype != NULL_TREE && TREE_CODE (valtype) != VOID_TYPE)
 	{
-	  bool warned_here;
-	  if (flag_isoc99)
-	    warned_here = pedwarn
-	      (loc, warn_return_type >= 0 ? OPT_Wreturn_type : 0,
-	       "%<return%> with no value, in function returning non-void");
-	  else
-	    warned_here = warning_at
-	      (loc, OPT_Wreturn_type,
-	       "%<return%> with no value, in function returning non-void");
 	  no_warning = true;
-	  if (warned_here)
+	  if (emit_diagnostic (flag_isoc99 ? DK_PEDWARN : DK_WARNING,
+			       loc, OPT_Wreturn_mismatch,
+			       "%<return%> with no value,"
+			       " in function returning non-void"))
 	    inform (DECL_SOURCE_LOCATION (current_function_decl),
 		    "declared here");
 	}
@@ -11294,7 +11182,7 @@ c_finish_return (location_t loc, tree retval, tree origtype)
       bool warned_here;
       if (TREE_CODE (TREE_TYPE (retval)) != VOID_TYPE)
 	warned_here = pedwarn
-	  (xloc, warn_return_type >= 0 ? OPT_Wreturn_type : 0,
+	  (xloc, OPT_Wreturn_mismatch,
 	   "%<return%> with a value, in function returning void");
       else
 	warned_here = pedwarn
@@ -11977,7 +11865,7 @@ build_vec_cmp (tree_code code, tree type,
 {
   tree zero_vec = build_zero_cst (type);
   tree minus_one_vec = build_minus_one_cst (type);
-  tree cmp_type = truth_type_for (type);
+  tree cmp_type = truth_type_for (TREE_TYPE (arg0));
   tree cmp = build2 (code, cmp_type, arg0, arg1);
   return build3 (VEC_COND_EXPR, type, cmp, minus_one_vec, zero_vec);
 }
@@ -12357,12 +12245,14 @@ build_binary_op (location_t location, enum tree_code code,
     {
     case PLUS_EXPR:
       /* Handle the pointer + int case.  */
-      if (code0 == POINTER_TYPE && code1 == INTEGER_TYPE)
+      if (code0 == POINTER_TYPE
+	  && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	{
 	  ret = pointer_int_sum (location, PLUS_EXPR, op0, op1);
 	  goto return_build_binary_op;
 	}
-      else if (code1 == POINTER_TYPE && code0 == INTEGER_TYPE)
+      else if (code1 == POINTER_TYPE
+	       && (code0 == INTEGER_TYPE || code0 == BITINT_TYPE))
 	{
 	  ret = pointer_int_sum (location, PLUS_EXPR, op1, op0);
 	  goto return_build_binary_op;
@@ -12381,7 +12271,8 @@ build_binary_op (location_t location, enum tree_code code,
 	  goto return_build_binary_op;
 	}
       /* Handle pointer minus int.  Just like pointer plus int.  */
-      else if (code0 == POINTER_TYPE && code1 == INTEGER_TYPE)
+      else if (code0 == POINTER_TYPE
+	       && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	{
 	  ret = pointer_int_sum (location, MINUS_EXPR, op0, op1);
 	  goto return_build_binary_op;
@@ -12403,11 +12294,11 @@ build_binary_op (location_t location, enum tree_code code,
       warn_for_div_by_zero (location, op1);
 
       if ((code0 == INTEGER_TYPE || code0 == REAL_TYPE
-	   || code0 == FIXED_POINT_TYPE
+	   || code0 == FIXED_POINT_TYPE || code0 == BITINT_TYPE
 	   || code0 == COMPLEX_TYPE
 	   || gnu_vector_type_p (type0))
 	  && (code1 == INTEGER_TYPE || code1 == REAL_TYPE
-	      || code1 == FIXED_POINT_TYPE
+	      || code1 == FIXED_POINT_TYPE || code1 == BITINT_TYPE
 	      || code1 == COMPLEX_TYPE
 	      || gnu_vector_type_p (type1)))
 	{
@@ -12418,8 +12309,9 @@ build_binary_op (location_t location, enum tree_code code,
 	  if (code1 == COMPLEX_TYPE || code1 == VECTOR_TYPE)
 	    tcode1 = TREE_CODE (TREE_TYPE (TREE_TYPE (op1)));
 
-	  if (!((tcode0 == INTEGER_TYPE && tcode1 == INTEGER_TYPE)
-	      || (tcode0 == FIXED_POINT_TYPE && tcode1 == FIXED_POINT_TYPE)))
+	  if (!(((tcode0 == INTEGER_TYPE || tcode0 == BITINT_TYPE)
+		 && (tcode1 == INTEGER_TYPE || tcode1 == BITINT_TYPE))
+		|| (tcode0 == FIXED_POINT_TYPE && tcode1 == FIXED_POINT_TYPE)))
 	    resultcode = RDIV_EXPR;
 	  else
 	    /* Although it would be tempting to shorten always here, that
@@ -12435,7 +12327,8 @@ build_binary_op (location_t location, enum tree_code code,
     case BIT_AND_EXPR:
     case BIT_IOR_EXPR:
     case BIT_XOR_EXPR:
-      if (code0 == INTEGER_TYPE && code1 == INTEGER_TYPE)
+      if ((code0 == INTEGER_TYPE || code0 == BITINT_TYPE)
+	  && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	shorten = -1;
       /* Allow vector types which are not floating point types.   */
       else if (gnu_vector_type_p (type0)
@@ -12455,7 +12348,8 @@ build_binary_op (location_t location, enum tree_code code,
 	  && TREE_CODE (TREE_TYPE (type0)) == INTEGER_TYPE
 	  && TREE_CODE (TREE_TYPE (type1)) == INTEGER_TYPE)
 	common = 1;
-      else if (code0 == INTEGER_TYPE && code1 == INTEGER_TYPE)
+      else if ((code0 == INTEGER_TYPE || code0 == BITINT_TYPE)
+	       && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	{
 	  /* Although it would be tempting to shorten always here, that loses
 	     on some targets, since the modulo instruction is undefined if the
@@ -12473,10 +12367,12 @@ build_binary_op (location_t location, enum tree_code code,
     case TRUTH_XOR_EXPR:
       if ((code0 == INTEGER_TYPE || code0 == POINTER_TYPE
 	   || code0 == REAL_TYPE || code0 == COMPLEX_TYPE
-	   || code0 == FIXED_POINT_TYPE || code0 == NULLPTR_TYPE)
+	   || code0 == FIXED_POINT_TYPE || code0 == NULLPTR_TYPE
+	   || code0 == BITINT_TYPE)
 	  && (code1 == INTEGER_TYPE || code1 == POINTER_TYPE
 	      || code1 == REAL_TYPE || code1 == COMPLEX_TYPE
-	      || code1 == FIXED_POINT_TYPE || code1 ==  NULLPTR_TYPE))
+	      || code1 == FIXED_POINT_TYPE || code1 == NULLPTR_TYPE
+	      || code1 == BITINT_TYPE))
 	{
 	  /* Result of these operations is always an int,
 	     but that does not mean the operands should be
@@ -12539,9 +12435,10 @@ build_binary_op (location_t location, enum tree_code code,
 	  converted = 1;
 	}
       else if ((code0 == INTEGER_TYPE || code0 == FIXED_POINT_TYPE
+		|| code0 == BITINT_TYPE
 		|| (gnu_vector_type_p (type0)
 		    && TREE_CODE (TREE_TYPE (type0)) == INTEGER_TYPE))
-	       && code1 == INTEGER_TYPE)
+	       && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	{
 	  doing_shift = true;
 	  if (TREE_CODE (op1) == INTEGER_CST)
@@ -12599,9 +12496,10 @@ build_binary_op (location_t location, enum tree_code code,
 	  converted = 1;
 	}
       else if ((code0 == INTEGER_TYPE || code0 == FIXED_POINT_TYPE
+		|| code0 == BITINT_TYPE
 		|| (gnu_vector_type_p (type0)
 		    && TREE_CODE (TREE_TYPE (type0)) == INTEGER_TYPE))
-	       && code1 == INTEGER_TYPE)
+	       && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	{
 	  doing_shift = true;
 	  if (TREE_CODE (op0) == INTEGER_CST
@@ -12715,9 +12613,10 @@ build_binary_op (location_t location, enum tree_code code,
       /* Result of comparison is always int,
 	 but don't convert the args to int!  */
       build_type = integer_type_node;
-      if ((code0 == INTEGER_TYPE || code0 == REAL_TYPE
+      if ((code0 == INTEGER_TYPE || code0 == REAL_TYPE || code0 == BITINT_TYPE
 	   || code0 == FIXED_POINT_TYPE || code0 == COMPLEX_TYPE)
 	  && (code1 == INTEGER_TYPE || code1 == REAL_TYPE
+	      || code1 == BITINT_TYPE
 	      || code1 == FIXED_POINT_TYPE || code1 == COMPLEX_TYPE))
 	short_compare = 1;
       else if (code0 == POINTER_TYPE
@@ -12768,7 +12667,7 @@ build_binary_op (location_t location, enum tree_code code,
 	  else
 	    /* Avoid warning about the volatile ObjC EH puts on decls.  */
 	    if (!objc_ok)
-	      pedwarn (location, 0,
+	      pedwarn (location, OPT_Wcompare_distinct_pointer_types,
 		       "comparison of distinct pointer types lacks a cast");
 
 	  if (result_type == NULL_TREE)
@@ -12778,12 +12677,14 @@ build_binary_op (location_t location, enum tree_code code,
 			      (build_qualified_type (void_type_node, qual));
 	    }
 	}
-      else if (code0 == POINTER_TYPE && code1 == INTEGER_TYPE)
+      else if (code0 == POINTER_TYPE
+	       && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	{
 	  result_type = type0;
 	  pedwarn (location, 0, "comparison between pointer and integer");
 	}
-      else if (code0 == INTEGER_TYPE && code1 == POINTER_TYPE)
+      else if ((code0 == INTEGER_TYPE || code0 == BITINT_TYPE)
+	       && code1 == POINTER_TYPE)
 	{
 	  result_type = type1;
 	  pedwarn (location, 0, "comparison between pointer and integer");
@@ -12871,9 +12772,9 @@ build_binary_op (location_t location, enum tree_code code,
         }
       build_type = integer_type_node;
       if ((code0 == INTEGER_TYPE || code0 == REAL_TYPE
-	   || code0 == FIXED_POINT_TYPE)
+	   || code0 == BITINT_TYPE || code0 == FIXED_POINT_TYPE)
 	  && (code1 == INTEGER_TYPE || code1 == REAL_TYPE
-	      || code1 == FIXED_POINT_TYPE))
+	      || code1 == BITINT_TYPE || code1 == FIXED_POINT_TYPE))
 	short_compare = 1;
       else if (code0 == POINTER_TYPE && code1 == POINTER_TYPE)
 	{
@@ -12908,8 +12809,8 @@ build_binary_op (location_t location, enum tree_code code,
 	      int qual = ENCODE_QUAL_ADDR_SPACE (as_common);
 	      result_type = build_pointer_type
 			      (build_qualified_type (void_type_node, qual));
-	      pedwarn (location, 0,
-		       "comparison of distinct pointer types lacks a cast");
+              pedwarn (location, OPT_Wcompare_distinct_pointer_types,
+                       "comparison of distinct pointer types lacks a cast");
 	    }
 	}
       else if (code0 == POINTER_TYPE && null_pointer_constant_p (orig_op1))
@@ -12932,12 +12833,14 @@ build_binary_op (location_t location, enum tree_code code,
 	    warning_at (location, OPT_Wextra,
 			"ordered comparison of pointer with integer zero");
 	}
-      else if (code0 == POINTER_TYPE && code1 == INTEGER_TYPE)
+      else if (code0 == POINTER_TYPE
+	       && (code1 == INTEGER_TYPE || code1 == BITINT_TYPE))
 	{
 	  result_type = type0;
 	  pedwarn (location, 0, "comparison between pointer and integer");
 	}
-      else if (code0 == INTEGER_TYPE && code1 == POINTER_TYPE)
+      else if ((code0 == INTEGER_TYPE || code0 == BITINT_TYPE)
+	       && code1 == POINTER_TYPE)
 	{
 	  result_type = type1;
 	  pedwarn (location, 0, "comparison between pointer and integer");
@@ -12991,12 +12894,11 @@ build_binary_op (location_t location, enum tree_code code,
     }
 
   if ((code0 == INTEGER_TYPE || code0 == REAL_TYPE || code0 == COMPLEX_TYPE
-       || code0 == FIXED_POINT_TYPE
+       || code0 == FIXED_POINT_TYPE || code0 == BITINT_TYPE
        || gnu_vector_type_p (type0))
-      &&
-      (code1 == INTEGER_TYPE || code1 == REAL_TYPE || code1 == COMPLEX_TYPE
-       || code1 == FIXED_POINT_TYPE
-       || gnu_vector_type_p (type1)))
+      && (code1 == INTEGER_TYPE || code1 == REAL_TYPE || code1 == COMPLEX_TYPE
+	  || code1 == FIXED_POINT_TYPE || code1 == BITINT_TYPE
+	  || gnu_vector_type_p (type1)))
     {
       bool first_complex = (code0 == COMPLEX_TYPE);
       bool second_complex = (code1 == COMPLEX_TYPE);
@@ -15822,6 +15724,7 @@ c_finish_omp_clauses (tree clauses, enum c_omp_region_type ort)
 	  continue;
 
 	case OMP_CLAUSE_IF:
+	case OMP_CLAUSE_SELF:
 	case OMP_CLAUSE_NUM_THREADS:
 	case OMP_CLAUSE_NUM_TEAMS:
 	case OMP_CLAUSE_THREAD_LIMIT:
@@ -15861,6 +15764,7 @@ c_finish_omp_clauses (tree clauses, enum c_omp_region_type ort)
 	case OMP_CLAUSE_IF_PRESENT:
 	case OMP_CLAUSE_FINALIZE:
 	case OMP_CLAUSE_NOHOST:
+	case OMP_CLAUSE_INDIRECT:
 	  pc = &OMP_CLAUSE_CHAIN (c);
 	  continue;
 

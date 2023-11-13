@@ -77,6 +77,9 @@ static bool verbose;
 /* Dependency output file.  */
 static const char *deps_file;
 
+/* Structured dependency output file.  */
+static const char *fdeps_file;
+
 /* The prefix given by -iprefix, if any.  */
 static const char *iprefix;
 
@@ -116,7 +119,7 @@ static void set_std_c89 (int, int);
 static void set_std_c99 (int);
 static void set_std_c11 (int);
 static void set_std_c17 (int);
-static void set_std_c2x (int);
+static void set_std_c23 (int);
 static void check_deps_environment_vars (void);
 static void handle_deferred_opts (void);
 static void sanitize_cpp_opts (void);
@@ -183,7 +186,7 @@ void
 c_common_diagnostics_set_defaults (diagnostic_context *context)
 {
   diagnostic_finalizer (context) = c_diagnostic_finalizer;
-  context->opt_permissive = OPT_fpermissive;
+  context->m_opt_permissive = OPT_fpermissive;
 }
 
 /* Input charset configuration for diagnostics.  */
@@ -235,7 +238,7 @@ c_common_init_options (unsigned int decoded_options_count,
     = new (ggc_alloc <string_concat_db> ()) string_concat_db ();
 
   parse_in = cpp_create_reader (c_dialect_cxx () ? CLK_GNUCXX: CLK_GNUC89,
-				ident_hash, line_table);
+				ident_hash, line_table, ident_hash_extra);
   cb = cpp_get_callbacks (parse_in);
   cb->diagnostic = c_cpp_diagnostic;
 
@@ -269,7 +272,7 @@ c_common_init_options (unsigned int decoded_options_count,
   if (c_dialect_cxx ())
     set_std_cxx17 (/*ISO*/false);
 
-  global_dc->colorize_source_p = true;
+  global_dc->m_source_printing.colorize_source_p = true;
 }
 
 /* Handle switch SCODE with argument ARG.  VALUE is true, unless no-
@@ -359,6 +362,24 @@ c_common_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
       cpp_opts->deps.style = (code == OPT_MD ? DEPS_SYSTEM: DEPS_USER);
       cpp_opts->deps.need_preprocessor_output = true;
       deps_file = arg;
+      break;
+
+    case OPT_fdeps_format_:
+      /* https://wg21.link/p1689r5 */
+      if (!strcmp (arg, "p1689r5"))
+	cpp_opts->deps.fdeps_format = FDEPS_FMT_P1689R5;
+      else
+	error ("%<-fdeps-format=%> unknown format %<%s%>", arg);
+      break;
+
+    case OPT_fdeps_file_:
+      deps_seen = true;
+      fdeps_file = arg;
+      break;
+
+    case OPT_fdeps_target_:
+      deps_seen = true;
+      defer_opt (code, arg);
       break;
 
     case OPT_MF:
@@ -502,7 +523,7 @@ c_common_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
 
     case OPT_fpermissive:
       flag_permissive = value;
-      global_dc->permissive = value;
+      global_dc->m_permissive = value;
       break;
 
     case OPT_fpreprocessed:
@@ -711,14 +732,14 @@ c_common_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
 	set_std_c17 (false /* ISO */);
       break;
 
-    case OPT_std_c2x:
+    case OPT_std_c23:
       if (!preprocessing_asm_p)
-	set_std_c2x (true /* ISO */);
+	set_std_c23 (true /* ISO */);
       break;
 
-    case OPT_std_gnu2x:
+    case OPT_std_gnu23:
       if (!preprocessing_asm_p)
-	set_std_c2x (false /* ISO */);
+	set_std_c23 (false /* ISO */);
       break;
 
     case OPT_trigraphs:
@@ -833,6 +854,20 @@ c_common_post_options (const char **pfilename)
       && flag_unsafe_math_optimizations == 0)
     flag_fp_contract_mode = FP_CONTRACT_OFF;
 
+  /* C language modes before C99 enable -fpermissive by default, but
+     only if -pedantic-errors is not specified.  Also treat
+     -fno-permissive as a subset of -pedantic-errors that does not
+     reject certain GNU extensions also present the defaults for later
+     language modes.  */
+  if (!c_dialect_cxx ()
+      && !flag_isoc99
+      && !global_dc->m_pedantic_errors
+      && !OPTION_SET_P (flag_permissive))
+    {
+      flag_permissive = 1;
+      global_dc->m_permissive = 1;
+    }
+
   /* If we are compiling C, and we are outside of a standards mode,
      we can permit the new values from ISO/IEC TS 18661-3 for
      FLT_EVAL_METHOD.  Otherwise, we must restrict the possible values to
@@ -845,9 +880,9 @@ c_common_post_options (const char **pfilename)
   else
     flag_permitted_flt_eval_methods = PERMITTED_FLT_EVAL_METHODS_C11;
 
-  /* C2X Annex F does not permit certain built-in functions to raise
+  /* C23 Annex F does not permit certain built-in functions to raise
      "inexact".  */
-  if (flag_isoc2x)
+  if (flag_isoc23)
     SET_OPTION_IF_UNSET (&global_options, &global_options_set,
 			 flag_fp_int_builtin_inexact, 0);
 
@@ -923,9 +958,9 @@ c_common_post_options (const char **pfilename)
   if (warn_implicit_int == -1)
     warn_implicit_int = flag_isoc99;
 
-  /* -Wold-style-definition is enabled by default for C2X.  */
+  /* -Wold-style-definition is enabled by default for C23.  */
   if (warn_old_style_definition == -1)
-    warn_old_style_definition = flag_isoc2x;
+    warn_old_style_definition = flag_isoc23;
 
   /* -Wshift-overflow is enabled by default in C99 and C++11 modes.  */
   if (warn_shift_overflow == -1)
@@ -974,7 +1009,7 @@ c_common_post_options (const char **pfilename)
 
   /* Change flag_abi_version to be the actual current ABI level, for the
      benefit of c_cpp_builtins, and to make comparison simpler.  */
-  const int latest_abi_version = 18;
+  const int latest_abi_version = 19;
   /* Generate compatibility aliases for ABI v13 (8.2) by default.  */
   const int abi_compat_default = 13;
 
@@ -1071,9 +1106,9 @@ c_common_post_options (const char **pfilename)
   if (warn_invalid_constexpr == -1)
     warn_invalid_constexpr = (cxx_dialect < cxx23);
 
-  /* char8_t support is implicitly enabled in C++20 and C2X.  */
+  /* char8_t support is implicitly enabled in C++20 and C23.  */
   if (flag_char8_t == -1)
-    flag_char8_t = (cxx_dialect >= cxx20) || flag_isoc2x;
+    flag_char8_t = (cxx_dialect >= cxx20) || flag_isoc23;
   cpp_opts->unsigned_utf8char = flag_char8_t ? 1 : cpp_opts->unsigned_char;
 
   if (flag_extern_tls_init)
@@ -1281,6 +1316,7 @@ void
 c_common_finish (void)
 {
   FILE *deps_stream = NULL;
+  FILE *fdeps_stream = NULL;
 
   /* Note that we write the dependencies even if there are errors. This is
      useful for handling outdated generated headers that now trigger errors
@@ -1309,9 +1345,27 @@ c_common_finish (void)
      locations with input_location, which would be incorrect now.  */
   override_libcpp_locations = false;
 
+  if (cpp_opts->deps.fdeps_format != FDEPS_FMT_NONE)
+    {
+      if (!fdeps_file)
+	fdeps_stream = out_stream;
+      else if (fdeps_file[0] == '-' && fdeps_file[1] == '\0')
+	fdeps_stream = stdout;
+      else
+	{
+	  fdeps_stream = fopen (fdeps_file, "w");
+	  if (!fdeps_stream)
+	    fatal_error (input_location, "opening dependency file %s: %m",
+			 fdeps_file);
+	}
+      if (fdeps_stream == deps_stream && fdeps_stream != stdout)
+	fatal_error (input_location, "%<-MF%> and %<-fdeps-file=%> cannot share an output file %s: %m",
+		     fdeps_file);
+    }
+
   /* For performance, avoid tearing down cpplib's internal structures
      with cpp_destroy ().  */
-  cpp_finish (parse_in, deps_stream);
+  cpp_finish (parse_in, deps_stream, fdeps_stream);
 
   if (deps_stream && deps_stream != out_stream && deps_stream != stdout
       && (ferror (deps_stream) || fclose (deps_stream)))
@@ -1383,6 +1437,8 @@ handle_deferred_opts (void)
 
 	if (opt->code == OPT_MT || opt->code == OPT_MQ)
 	  deps_add_target (deps, opt->arg, opt->code == OPT_MQ);
+	else if (opt->code == OPT_fdeps_target_)
+	  fdeps_add_target (deps, opt->arg, true);
       }
 }
 
@@ -1668,7 +1724,7 @@ set_std_c89 (int c94, int iso)
   flag_isoc94 = c94;
   flag_isoc99 = 0;
   flag_isoc11 = 0;
-  flag_isoc2x = 0;
+  flag_isoc23 = 0;
   lang_hooks.name = "GNU C89";
 }
 
@@ -1680,7 +1736,7 @@ set_std_c99 (int iso)
   flag_no_asm = iso;
   flag_no_nonansi_builtin = iso;
   flag_iso = iso;
-  flag_isoc2x = 0;
+  flag_isoc23 = 0;
   flag_isoc11 = 0;
   flag_isoc99 = 1;
   flag_isoc94 = 1;
@@ -1695,7 +1751,7 @@ set_std_c11 (int iso)
   flag_no_asm = iso;
   flag_no_nonansi_builtin = iso;
   flag_iso = iso;
-  flag_isoc2x = 0;
+  flag_isoc23 = 0;
   flag_isoc11 = 1;
   flag_isoc99 = 1;
   flag_isoc94 = 1;
@@ -1710,7 +1766,7 @@ set_std_c17 (int iso)
   flag_no_asm = iso;
   flag_no_nonansi_builtin = iso;
   flag_iso = iso;
-  flag_isoc2x = 0;
+  flag_isoc23 = 0;
   flag_isoc11 = 1;
   flag_isoc99 = 1;
   flag_isoc94 = 1;
@@ -1719,17 +1775,17 @@ set_std_c17 (int iso)
 
 /* Set the C 2X standard (without GNU extensions if ISO).  */
 static void
-set_std_c2x (int iso)
+set_std_c23 (int iso)
 {
-  cpp_set_lang (parse_in, iso ? CLK_STDC2X: CLK_GNUC2X);
+  cpp_set_lang (parse_in, iso ? CLK_STDC23: CLK_GNUC23);
   flag_no_asm = iso;
   flag_no_nonansi_builtin = iso;
   flag_iso = iso;
-  flag_isoc2x = 1;
+  flag_isoc23 = 1;
   flag_isoc11 = 1;
   flag_isoc99 = 1;
   flag_isoc94 = 1;
-  lang_hooks.name = "GNU C2X";
+  lang_hooks.name = "GNU C23";
 }
 
 

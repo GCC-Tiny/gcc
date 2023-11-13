@@ -319,6 +319,9 @@ struct GTY(()) machine_function
 
 #define SUPPORTS_WEAK 1
 
+#define MAKE_DECL_ONE_ONLY(DECL) \
+  (DECL_WEAK (DECL) = 1)
+
 /* The documentation states that ASM_OUTPUT_DEF_FROM_DECLS is used in
    preference to ASM_OUTPUT_DEF if the tree nodes are available.  However, we
    need the tree nodes to emit the prototype, so at this point it's not clear
@@ -337,6 +340,11 @@ struct GTY(()) machine_function
   while (0)
 #define ASM_OUTPUT_DEF_FROM_DECLS(STREAM, NAME, VALUE)	\
   nvptx_asm_output_def_from_decls (STREAM, NAME, VALUE)
+
+/* ..., but also override other macros to avoid 'gcc/defaults.h'-initialization
+   due to that dummy 'ASM_OUTPUT_DEF'.  */
+#define TARGET_USE_LOCAL_THUNK_ALIAS_P(DECL) TARGET_SUPPORTS_ALIASES
+#define TARGET_SUPPORTS_ALIASES (nvptx_alias != 0)
 
 #define NO_DOT_IN_LABEL
 #define ASM_COMMENT_START "//"

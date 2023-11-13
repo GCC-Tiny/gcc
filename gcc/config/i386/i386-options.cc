@@ -127,22 +127,35 @@ along with GCC; see the file COPYING3.  If not see
 #define m_ALDERLAKE (HOST_WIDE_INT_1U<<PROCESSOR_ALDERLAKE)
 #define m_ROCKETLAKE (HOST_WIDE_INT_1U<<PROCESSOR_ROCKETLAKE)
 #define m_GRANITERAPIDS (HOST_WIDE_INT_1U<<PROCESSOR_GRANITERAPIDS)
+#define m_GRANITERAPIDS_D (HOST_WIDE_INT_1U<<PROCESSOR_GRANITERAPIDS_D)
+#define m_ARROWLAKE (HOST_WIDE_INT_1U<<PROCESSOR_ARROWLAKE)
+#define m_ARROWLAKE_S (HOST_WIDE_INT_1U<<PROCESSOR_ARROWLAKE_S)
+#define m_PANTHERLAKE (HOST_WIDE_INT_1U<<PROCESSOR_PANTHERLAKE)
 #define m_CORE_AVX512 (m_SKYLAKE_AVX512 | m_CANNONLAKE \
 		       | m_ICELAKE_CLIENT | m_ICELAKE_SERVER | m_CASCADELAKE \
 		       | m_TIGERLAKE | m_COOPERLAKE | m_SAPPHIRERAPIDS \
-		       | m_ROCKETLAKE | m_GRANITERAPIDS)
+		       | m_ROCKETLAKE | m_GRANITERAPIDS | m_GRANITERAPIDS_D)
 #define m_CORE_AVX2 (m_HASWELL | m_SKYLAKE | m_CORE_AVX512)
 #define m_CORE_ALL (m_CORE2 | m_NEHALEM  | m_SANDYBRIDGE | m_CORE_AVX2)
+#define m_CORE_HYBRID (m_ALDERLAKE | m_ARROWLAKE | m_ARROWLAKE_S \
+		       | m_PANTHERLAKE)
 #define m_GOLDMONT (HOST_WIDE_INT_1U<<PROCESSOR_GOLDMONT)
 #define m_GOLDMONT_PLUS (HOST_WIDE_INT_1U<<PROCESSOR_GOLDMONT_PLUS)
 #define m_TREMONT (HOST_WIDE_INT_1U<<PROCESSOR_TREMONT)
 #define m_SIERRAFOREST (HOST_WIDE_INT_1U<<PROCESSOR_SIERRAFOREST)
 #define m_GRANDRIDGE (HOST_WIDE_INT_1U<<PROCESSOR_GRANDRIDGE)
-#define m_ARROWLAKE (HOST_WIDE_INT_1U<<PROCESSOR_ARROWLAKE)
-#define m_CORE_ATOM (m_SIERRAFOREST | m_GRANDRIDGE)
+#define m_CLEARWATERFOREST (HOST_WIDE_INT_1U<<PROCESSOR_CLEARWATERFOREST)
+#define m_CORE_ATOM (m_SIERRAFOREST | m_GRANDRIDGE | m_CLEARWATERFOREST)
 #define m_INTEL (HOST_WIDE_INT_1U<<PROCESSOR_INTEL)
+/* Gather Data Sampling / CVE-2022-40982 / INTEL-SA-00828.
+   Software mitigation.  */
+#define m_GDS (m_SKYLAKE | m_SKYLAKE_AVX512 | m_CANNONLAKE \
+	       | m_ICELAKE_CLIENT | m_ICELAKE_SERVER | m_CASCADELAKE \
+	       | m_TIGERLAKE | m_COOPERLAKE | m_ROCKETLAKE)
 
 #define m_LUJIAZUI (HOST_WIDE_INT_1U<<PROCESSOR_LUJIAZUI)
+#define m_YONGFENG (HOST_WIDE_INT_1U<<PROCESSOR_YONGFENG)
+#define m_ZHAOXIN  (m_LUJIAZUI | m_YONGFENG)
 
 #define m_GEODE (HOST_WIDE_INT_1U<<PROCESSOR_GEODE)
 #define m_K6 (HOST_WIDE_INT_1U<<PROCESSOR_K6)
@@ -243,7 +256,9 @@ static struct ix86_target_opts isa2_opts[] =
   { "-mavxvnniint16",	OPTION_MASK_ISA2_AVXVNNIINT16 },
   { "-msm3",		OPTION_MASK_ISA2_SM3 },
   { "-msha512",		OPTION_MASK_ISA2_SHA512 },
-  { "-msm4",            OPTION_MASK_ISA2_SM4 }
+  { "-msm4",            OPTION_MASK_ISA2_SM4 },
+  { "-mevex512",	OPTION_MASK_ISA2_EVEX512 },
+  { "-musermsr",	OPTION_MASK_ISA2_USER_MSR }
 };
 static struct ix86_target_opts isa_opts[] =
 {
@@ -687,6 +702,7 @@ ix86_function_specific_save (struct cl_target_option *ptr,
   ptr->branch_cost = ix86_branch_cost;
   ptr->tune_defaulted = ix86_tune_defaulted;
   ptr->arch_specified = ix86_arch_specified;
+  ptr->x_ix86_apx_features = opts->x_ix86_apx_features;
   ptr->x_ix86_isa_flags_explicit = opts->x_ix86_isa_flags_explicit;
   ptr->x_ix86_isa_flags2_explicit = opts->x_ix86_isa_flags2_explicit;
   ptr->x_recip_mask_explicit = opts->x_recip_mask_explicit;
@@ -757,6 +773,7 @@ static const struct processor_costs *processor_cost_table[] =
   &tremont_cost,
   &alderlake_cost,
   &alderlake_cost,
+  &alderlake_cost,
   &slm_cost,
   &slm_cost,
   &skylake_cost,
@@ -771,9 +788,13 @@ static const struct processor_costs *processor_cost_table[] =
   &alderlake_cost,
   &icelake_cost,
   &icelake_cost,
+  &icelake_cost,
+  &alderlake_cost,
+  &alderlake_cost,
   &alderlake_cost,
   &intel_cost,
   &lujiazui_cost,
+  &yongfeng_cost,
   &geode_cost,
   &k6_cost,
   &athlon_cost,
@@ -823,6 +844,7 @@ ix86_function_specific_restore (struct gcc_options *opts,
   ix86_prefetch_sse = ptr->prefetch_sse;
   ix86_tune_defaulted = ptr->tune_defaulted;
   ix86_arch_specified = ptr->arch_specified;
+  opts->x_ix86_apx_features = ptr->x_ix86_apx_features;
   opts->x_ix86_isa_flags_explicit = ptr->x_ix86_isa_flags_explicit;
   opts->x_ix86_isa_flags2_explicit = ptr->x_ix86_isa_flags2_explicit;
   opts->x_recip_mask_explicit = ptr->x_recip_mask_explicit;
@@ -1100,6 +1122,9 @@ ix86_valid_target_attribute_inner_p (tree fndecl, tree args, char *p_strings[],
     IX86_ATTR_ISA ("sm3", OPT_msm3),
     IX86_ATTR_ISA ("sha512", OPT_msha512),
     IX86_ATTR_ISA ("sm4", OPT_msm4),
+    IX86_ATTR_ISA ("apxf", OPT_mapxf),
+    IX86_ATTR_ISA ("evex512", OPT_mevex512),
+    IX86_ATTR_ISA ("usermsr", OPT_musermsr),
 
     /* enum options */
     IX86_ATTR_ENUM ("fpmath=",	OPT_mfpmath_),
@@ -1731,20 +1756,46 @@ parse_mtune_ctrl_str (struct gcc_options *opts, bool dump)
           curr_feature_string++;
           clear = true;
         }
-      for (i = 0; i < X86_TUNE_LAST; i++)
-        {
-          if (!strcmp (curr_feature_string, ix86_tune_feature_names[i]))
-            {
-              ix86_tune_features[i] = !clear;
-              if (dump)
-                fprintf (stderr, "Explicitly %s feature %s\n",
-                         clear ? "clear" : "set", ix86_tune_feature_names[i]);
-              break;
-            }
-        }
-      if (i == X86_TUNE_LAST)
-	error ("unknown parameter to option %<-mtune-ctrl%>: %s",
-	       clear ? curr_feature_string - 1 : curr_feature_string);
+
+      if (!strcmp (curr_feature_string, "use_gather"))
+	{
+	  ix86_tune_features[X86_TUNE_USE_GATHER_2PARTS] = !clear;
+	  ix86_tune_features[X86_TUNE_USE_GATHER_4PARTS] = !clear;
+	  ix86_tune_features[X86_TUNE_USE_GATHER_8PARTS] = !clear;
+	  if (dump)
+	    fprintf (stderr, "Explicitly %s features use_gather_2parts,"
+		     " use_gather_4parts, use_gather_8parts\n",
+		     clear ? "clear" : "set");
+
+	}
+      else if (!strcmp (curr_feature_string, "use_scatter"))
+	{
+	  ix86_tune_features[X86_TUNE_USE_SCATTER_2PARTS] = !clear;
+	  ix86_tune_features[X86_TUNE_USE_SCATTER_4PARTS] = !clear;
+	  ix86_tune_features[X86_TUNE_USE_SCATTER_8PARTS] = !clear;
+	  if (dump)
+	    fprintf (stderr, "Explicitly %s features use_scatter_2parts,"
+		     " use_scatter_4parts, use_scatter_8parts\n",
+		     clear ? "clear" : "set");
+	}
+      else
+	{
+	  for (i = 0; i < X86_TUNE_LAST; i++)
+	    {
+	      if (!strcmp (curr_feature_string, ix86_tune_feature_names[i]))
+		{
+		  ix86_tune_features[i] = !clear;
+		  if (dump)
+		    fprintf (stderr, "Explicitly %s feature %s\n",
+			     clear ? "clear" : "set", ix86_tune_feature_names[i]);
+		  break;
+		}
+	    }
+
+	  if (i == X86_TUNE_LAST)
+	    error ("unknown parameter to option %<-mtune-ctrl%>: %s",
+		   clear ? curr_feature_string - 1 : curr_feature_string);
+	}
       curr_feature_string = next_feature_string;
     }
   while (curr_feature_string);
@@ -2045,6 +2096,9 @@ ix86_option_override_internal (bool main_args_p,
       opts->x_ix86_stringop_alg = no_stringop;
     }
 
+  if (TARGET_APX_F && !TARGET_64BIT)
+    error ("%<-mapxf%> is not supported for 32-bit code");
+
   if (TARGET_UINTR && !TARGET_64BIT)
     error ("%<-muintr%> not supported for 32-bit code");
 
@@ -2258,6 +2312,14 @@ ix86_option_override_internal (bool main_args_p,
 	      SET_TARGET_POPCNT (opts);
 	  }
 
+	/* Enable apx if apxf or apx_features are not
+	   explicitly set for -march.  */
+	if (TARGET_64BIT_P (opts->x_ix86_isa_flags)
+	     && ((processor_alias_table[i].flags & PTA_APX_F) != 0)
+	     && !TARGET_EXPLICIT_APX_F_P (opts)
+	     && !OPTION_SET_P (ix86_apx_features))
+	  opts->x_ix86_apx_features = apx_all;
+
 	if ((processor_alias_table[i].flags
 	   & (PTA_PREFETCH_SSE | PTA_SSE)) != 0)
 	  ix86_prefetch_sse = true;
@@ -2409,6 +2471,10 @@ ix86_option_override_internal (bool main_args_p,
   /* Arrange to set up i386_stack_locals for all functions.  */
   init_machine_status = ix86_init_machine_status;
 
+  /* Override APX flag here if ISA bit is set.  */
+  if (TARGET_APX_F && !OPTION_SET_P (ix86_apx_features))
+    opts->x_ix86_apx_features = apx_all;
+
   /* Validate -mregparm= value.  */
   if (opts_set->x_ix86_regparm)
     {
@@ -2523,6 +2589,21 @@ ix86_option_override_internal (bool main_args_p,
     opts->x_ix86_isa_flags
       &= ~((OPTION_MASK_ISA_BMI | OPTION_MASK_ISA_BMI2 | OPTION_MASK_ISA_TBM)
 	   & ~opts->x_ix86_isa_flags_explicit);
+
+  /* Set EVEX512 target if it is not explicitly set
+     when AVX512 is enabled.  */
+  if (TARGET_AVX512F_P(opts->x_ix86_isa_flags)
+      && !(opts->x_ix86_isa_flags2_explicit & OPTION_MASK_ISA2_EVEX512))
+    opts->x_ix86_isa_flags2 |= OPTION_MASK_ISA2_EVEX512;
+
+  /* Disable AVX512{PF,ER,4VNNIW,4FAMPS} for -mno-evex512.  */
+  if (!TARGET_EVEX512_P(opts->x_ix86_isa_flags2))
+    {
+      opts->x_ix86_isa_flags
+	&= ~(OPTION_MASK_ISA_AVX512PF | OPTION_MASK_ISA_AVX512ER);
+      opts->x_ix86_isa_flags2
+	&= ~(OPTION_MASK_ISA2_AVX5124FMAPS | OPTION_MASK_ISA2_AVX5124VNNIW);
+    }
 
   /* Validate -mpreferred-stack-boundary= value or default it to
      PREFERRED_STACK_BOUNDARY_DEFAULT.  */
@@ -2793,7 +2874,8 @@ ix86_option_override_internal (bool main_args_p,
 	  opts->x_ix86_move_max = opts->x_prefer_vector_width_type;
 	  if (opts_set->x_ix86_move_max == PVW_NONE)
 	    {
-	      if (TARGET_AVX512F_P (opts->x_ix86_isa_flags))
+	      if (TARGET_AVX512F_P (opts->x_ix86_isa_flags)
+		  && TARGET_EVEX512_P (opts->x_ix86_isa_flags2))
 		opts->x_ix86_move_max = PVW_AVX512;
 	      else
 		opts->x_ix86_move_max = PVW_AVX128;
@@ -2814,7 +2896,8 @@ ix86_option_override_internal (bool main_args_p,
 	  opts->x_ix86_store_max = opts->x_prefer_vector_width_type;
 	  if (opts_set->x_ix86_store_max == PVW_NONE)
 	    {
-	      if (TARGET_AVX512F_P (opts->x_ix86_isa_flags))
+	      if (TARGET_AVX512F_P (opts->x_ix86_isa_flags)
+		  && TARGET_EVEX512_P (opts->x_ix86_isa_flags2))
 		opts->x_ix86_store_max = PVW_AVX512;
 	      else
 		opts->x_ix86_store_max = PVW_AVX128;
@@ -3093,13 +3176,13 @@ ix86_simd_clone_adjust (struct cgraph_node *node)
     case 'e':
       if (TARGET_PREFER_AVX256)
 	{
-	  if (!TARGET_AVX512F)
-	    str = "avx512f,prefer-vector-width=512";
+	  if (!TARGET_AVX512F || !TARGET_EVEX512)
+	    str = "avx512f,evex512,prefer-vector-width=512";
 	  else
 	    str = "prefer-vector-width=512";
 	}
-      else if (!TARGET_AVX512F)
-	str = "avx512f";
+      else if (!TARGET_AVX512F || !TARGET_EVEX512)
+	str = "avx512f,evex512";
       break;
     default:
       gcc_unreachable ();

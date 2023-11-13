@@ -878,7 +878,7 @@ make_edges_bb (basic_block bb, struct omp_region **pcur_region, int *pomp_index)
       fallthru = false;
       break;
     case GIMPLE_RESX:
-      make_eh_edges (last);
+      make_eh_edge (last);
       fallthru = false;
       break;
     case GIMPLE_EH_DISPATCH:
@@ -894,7 +894,7 @@ make_edges_bb (basic_block bb, struct omp_region **pcur_region, int *pomp_index)
 
       /* If this statement has reachable exception handlers, then
 	 create abnormal edges to them.  */
-      make_eh_edges (last);
+      make_eh_edge (last);
 
       /* BUILTIN_RETURN is really a return statement.  */
       if (gimple_call_builtin_p (last, BUILT_IN_RETURN))
@@ -911,7 +911,7 @@ make_edges_bb (basic_block bb, struct omp_region **pcur_region, int *pomp_index)
       /* A GIMPLE_ASSIGN may throw internally and thus be considered
 	 control-altering.  */
       if (is_ctrl_altering_stmt (last))
-	make_eh_edges (last);
+	make_eh_edge (last);
       fallthru = true;
       break;
 
@@ -1214,6 +1214,22 @@ assign_discriminators (void)
 	{
 	  gimple *stmt = gsi_stmt (gsi);
 
+	  /* Don't allow debug stmts to affect discriminators, but
+	     allow them to take discriminators when they're on the
+	     same line as the preceding nondebug stmt.  */
+	  if (is_gimple_debug (stmt))
+	    {
+	      if (curr_locus != UNKNOWN_LOCATION
+		  && same_line_p (curr_locus, &curr_locus_e,
+				  gimple_location (stmt)))
+		{
+		  location_t loc = gimple_location (stmt);
+		  location_t dloc = location_with_discriminator (loc,
+								 curr_discr);
+		  gimple_set_location (stmt, dloc);
+		}
+	      continue;
+	    }
 	  if (curr_locus == UNKNOWN_LOCATION)
 	    {
 	      curr_locus = gimple_location (stmt);
@@ -5684,12 +5700,48 @@ gimple_verify_flow_info (void)
 	error ("fallthru to exit from bb %d", e->src->index);
 	err = true;
       }
+  if (cfun->cfg->full_profile
+      && !ENTRY_BLOCK_PTR_FOR_FN (cfun)->count.initialized_p ())
+    {
+      error ("entry block count not initialized");
+      err = true;
+    }
+  if (cfun->cfg->full_profile
+      && !EXIT_BLOCK_PTR_FOR_FN (cfun)->count.initialized_p ())
+    {
+      error ("exit block count not initialized");
+      err = true;
+    }
+  if (cfun->cfg->full_profile
+      && !single_succ_edge
+	      (ENTRY_BLOCK_PTR_FOR_FN (cfun))->probability.initialized_p ())
+    {
+      error ("probability of edge from entry block not initialized");
+      err = true;
+    }
+
 
   FOR_EACH_BB_FN (bb, cfun)
     {
       bool found_ctrl_stmt = false;
 
       stmt = NULL;
+
+      if (cfun->cfg->full_profile)
+        {
+	  if (!bb->count.initialized_p ())
+	    {
+	      error ("count of bb %d not initialized", bb->index);
+	      err = true;
+	    }
+	  FOR_EACH_EDGE (e, ei, bb->succs)
+	    if (!e->probability.initialized_p ())
+	      {
+		error ("probability of edge %d->%d not initialized",
+		       bb->index, e->dest->index);
+		err = true;
+	      }
+        }
 
       /* Skip labels on the start of basic block.  */
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
@@ -7734,11 +7786,14 @@ fold_loop_internal_call (gimple *g, tree value)
 		 test.  This should not happen as the guarded code should
 		 start with pre-header.  */
 	      gcc_assert (single_pred_edge (taken_edge->dest));
-	      taken_edge->dest->count
-		= taken_edge->dest->count.apply_scale (new_count,
-						       old_count);
-	      scale_strictly_dominated_blocks (taken_edge->dest,
-					       new_count, old_count);
+	      if (old_count.nonzero_p ())
+		{
+		  taken_edge->dest->count
+		    = taken_edge->dest->count.apply_scale (new_count,
+							   old_count);
+		  scale_strictly_dominated_blocks (taken_edge->dest,
+						   new_count, old_count);
+		}
 	    }
 	}
     }
@@ -8121,11 +8176,14 @@ move_sese_region_to_fn (struct function *dest_cfun, basic_block entry_bb,
   bb = create_empty_bb (entry_pred[0]);
   if (current_loops)
     add_bb_to_loop (bb, loop);
+  profile_count count = profile_count::zero ();
   for (i = 0; i < num_entry_edges; i++)
     {
       e = make_edge (entry_pred[i], bb, entry_flag[i]);
       e->probability = entry_prob[i];
+      count += e->count ();
     }
+  bb->count = count;
 
   for (i = 0; i < num_exit_edges; i++)
     {
@@ -8565,7 +8623,7 @@ print_loop_info (FILE *file, const class loop *loop, const char *prefix)
       fprintf (file, "\n%siterations by profile: %f (%s%s) entry count:", prefix,
 	       iterations.to_double (), reliable ? "reliable" : "unreliable",
 	       maybe_flat_loop_profile (loop) ? ", maybe flat" : "");
-      loop_count_in (loop).dump (dump_file, cfun);
+      loop_count_in (loop).dump (file, cfun);
     }
 
 }

@@ -15,8 +15,7 @@
 // with this library; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
-// { dg-options "-std=gnu++2a" }
-// { dg-do compile { target c++2a } }
+// { dg-do compile { target c++20 } }
 
 #include <span>
 
@@ -25,7 +24,7 @@ test01(bool b)
 {
   std::span<int, 0> s;
   if (b || !s.empty())
-    s[99];
+    (void) s[99];
   return true;
 }
 

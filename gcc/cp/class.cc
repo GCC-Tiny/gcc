@@ -205,6 +205,7 @@ static tree get_vcall_index (tree, tree);
 static bool type_maybe_constexpr_default_constructor (tree);
 static bool type_maybe_constexpr_destructor (tree);
 static bool field_poverlapping_p (tree);
+static void propagate_class_warmth_attribute (tree);
 
 /* Set CURRENT_ACCESS_SPECIFIER based on the protection of DECL.  */
 
@@ -3292,6 +3293,22 @@ one_inherited_ctor (tree ctor, tree t, tree using_decl)
     }
 }
 
+/* Implicitly declare T().  */
+
+static void
+add_implicit_default_ctor (tree t)
+{
+  TYPE_HAS_DEFAULT_CONSTRUCTOR (t) = 1;
+  CLASSTYPE_LAZY_DEFAULT_CTOR (t) = 1;
+  if (cxx_dialect >= cxx11)
+    TYPE_HAS_CONSTEXPR_CTOR (t)
+      /* Don't force the declaration to get a hard answer; if the
+	 definition would have made the class non-literal, it will still be
+	 non-literal because of the base or member in question, and that
+	 gives a better diagnostic.  */
+      = type_maybe_constexpr_default_constructor (t);
+}
+
 /* Create default constructors, assignment operators, and so forth for
    the type indicated by T, if they are needed.  CANT_HAVE_CONST_CTOR,
    and CANT_HAVE_CONST_ASSIGNMENT are nonzero if, for whatever reason,
@@ -3320,17 +3337,7 @@ add_implicitly_declared_members (tree t, tree* access_decls,
      If there is no user-declared constructor for a class, a default
      constructor is implicitly declared.  */
   if (! TYPE_HAS_USER_CONSTRUCTOR (t))
-    {
-      TYPE_HAS_DEFAULT_CONSTRUCTOR (t) = 1;
-      CLASSTYPE_LAZY_DEFAULT_CTOR (t) = 1;
-      if (cxx_dialect >= cxx11)
-	TYPE_HAS_CONSTEXPR_CTOR (t)
-	  /* Don't force the declaration to get a hard answer; if the
-	     definition would have made the class non-literal, it will still be
-	     non-literal because of the base or member in question, and that
-	     gives a better diagnostic.  */
-	  = type_maybe_constexpr_default_constructor (t);
-    }
+    add_implicit_default_ctor (t);
 
   /* [class.ctor]
 
@@ -3394,7 +3401,13 @@ add_implicitly_declared_members (tree t, tree* access_decls,
 	  location_t loc = input_location;
 	  input_location = DECL_SOURCE_LOCATION (using_decl);
 	  for (tree fn : ovl_range (ctor_list))
-	    one_inherited_ctor (fn, t, using_decl);
+	    {
+	      if (!TYPE_HAS_DEFAULT_CONSTRUCTOR (t) && default_ctor_p (fn))
+		/* CWG2799: Inheriting a default constructor gives us a default
+		   constructor, not just an inherited constructor.  */
+		add_implicit_default_ctor (t);
+	      one_inherited_ctor (fn, t, using_decl);
+	    }
 	  *access_decls = TREE_CHAIN (*access_decls);
 	  input_location = loc;
 	}
@@ -4053,9 +4066,33 @@ check_subobject_offset (tree type, tree offset, splay_tree offsets)
   if (!n)
     return 0;
 
+  enum { ignore, fast, slow, warn }
+  cv_check = (abi_version_crosses (19) ? slow
+	      : abi_version_at_least (19) ? fast
+	      : ignore);
   for (t = (tree) n->value; t; t = TREE_CHAIN (t))
-    if (same_type_p (TREE_VALUE (t), type))
-      return 1;
+    {
+      tree elt = TREE_VALUE (t);
+
+      if (same_type_p (elt, type))
+	return 1;
+
+      if (cv_check != ignore
+	  && similar_type_p (elt, type))
+	{
+	  if (cv_check == fast)
+	    return 1;
+	  cv_check = warn;
+	}
+    }
+
+  if (cv_check == warn)
+    {
+      warning (OPT_Wabi, "layout of %qs member of type %qT changes in %qs",
+	       "[[no_unique_address]]", type, "-fabi-version=19");
+      if (abi_version_at_least (19))
+	return 1;
+    }
 
   return 0;
 }
@@ -5651,6 +5688,14 @@ type_has_virtual_destructor (tree type)
   return (dtor && DECL_VIRTUAL_P (dtor));
 }
 
+/* True iff class TYPE has a non-deleted trivial default
+   constructor.  */
+
+bool type_has_non_deleted_trivial_default_ctor (tree type)
+{
+  return TYPE_HAS_TRIVIAL_DFLT (type) && locate_ctor (type);
+}
+
 /* Returns true iff T, a class, has a move-assignment or
    move-constructor.  Does not lazily declare either.
    If USER_P is false, any move function will do.  If it is true, the
@@ -6253,6 +6298,12 @@ check_bases_and_members (tree t)
      allocating an array of this type.  */
   LANG_TYPE_CLASS_CHECK (t)->vec_new_uses_cookie
     = type_requires_array_cookie (t);
+
+  /* Classes marked hot or cold propagate the attribute to all members.  We
+     may do this now that methods are declared.  This does miss some lazily
+     declared special member functions (CLASSTYPE_LAZY_*), which are handled
+     in lazily_declare_fn later on.  */
+  propagate_class_warmth_attribute (t);
 }
 
 /* If T needs a pointer to its virtual function table, set TYPE_VFIELD
@@ -7733,6 +7784,28 @@ unreverse_member_declarations (tree t)
     }
 }
 
+/* Classes, structs or unions T marked with hotness attributes propagate
+   the attribute to all methods.  */
+
+void
+propagate_class_warmth_attribute (tree t)
+{
+  if (t == NULL_TREE
+      || !(TREE_CODE (t) == RECORD_TYPE
+	   || TREE_CODE (t) == UNION_TYPE))
+    return;
+
+  tree class_has_cold_attr
+    = lookup_attribute ("cold", TYPE_ATTRIBUTES (t));
+  tree class_has_hot_attr
+    = lookup_attribute ("hot", TYPE_ATTRIBUTES (t));
+
+  if (class_has_cold_attr || class_has_hot_attr)
+    for (tree f = TYPE_FIELDS (t); f; f = DECL_CHAIN (f))
+      if (TREE_CODE (f) == FUNCTION_DECL)
+	maybe_propagate_warmth_attributes (f, t);
+}
+
 tree
 finish_struct (tree t, tree attributes)
 {
@@ -8778,15 +8851,6 @@ instantiate_type (tree lhstype, tree rhs, tsubst_flags_t complain)
       rhs = BASELINK_FUNCTIONS (rhs);
     }
 
-  /* If we are in a template, and have a NON_DEPENDENT_EXPR, we cannot
-     deduce any type information.  */
-  if (TREE_CODE (rhs) == NON_DEPENDENT_EXPR)
-    {
-      if (complain & tf_error)
-	error ("not enough type information");
-      return error_mark_node;
-    }
-
   /* There are only a few kinds of expressions that may have a type
      dependent on overload resolution.  */
   gcc_assert (TREE_CODE (rhs) == ADDR_EXPR
@@ -9058,7 +9122,7 @@ note_name_declared_in_class (tree name, tree decl)
 	 A name N used in a class S shall refer to the same declaration
 	 in its context and when re-evaluated in the completed scope of
 	 S.  */
-      auto ov = make_temp_override (global_dc->pedantic_errors);
+      auto ov = make_temp_override (global_dc->m_pedantic_errors);
       if (TREE_CODE (decl) == TYPE_DECL
 	  && TREE_CODE (olddecl) == TYPE_DECL
 	  && same_type_p (TREE_TYPE (decl), TREE_TYPE (olddecl)))
@@ -9067,7 +9131,7 @@ note_name_declared_in_class (tree name, tree decl)
 	/* Let -fpermissive make it a warning like past versions.  */;
       else
 	/* Make it an error.  */
-	global_dc->pedantic_errors = 1;
+	global_dc->m_pedantic_errors = 1;
       if (pedwarn (location_of (decl), OPT_Wchanges_meaning,
 		   "declaration of %q#D changes meaning of %qD",
 		   decl, OVL_NAME (decl)))
